@@ -428,9 +428,17 @@
     --col-members: 220px;
     --col-preview: 380px;
     display: grid;
-    grid-template-columns: var(--col-songs) 1fr var(--col-members) var(--col-preview);
+    /* minmax() prevents any column (especially the editor's 1fr) from collapsing to 0
+       when the window is narrower than the sum of fixed columns. overflow-x:auto lets
+       the user horizontally scroll on very narrow windows instead of losing the editor. */
+    grid-template-columns:
+      minmax(220px, var(--col-songs))
+      minmax(360px, 1fr)
+      minmax(180px, var(--col-members))
+      minmax(280px, var(--col-preview));
     height: calc(100vh - 52px);
     position: relative;
+    overflow-x: auto;
   }
   .col-resizer {
     position: absolute; top: 0; bottom: 0; width: 6px;
