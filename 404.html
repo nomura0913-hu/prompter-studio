@@ -1609,16 +1609,15 @@ function createBlankMember(id) {
   const idx = (id - 1) % DEFAULT_COLORS.length;
   return { name: "", color: DEFAULT_COLORS[idx] };
 }
-function initMembers(n) {
-  const m = {};
-  for (let i = 1; i <= n; i++) m[String(i)] = createBlankMember(i);
-  return m;
+// Initial member state: just one white member. Users add more as needed.
+function initMembers() {
+  return { "1": { name: "", color: "#ffffff" } };
 }
 
 // Setlist-level state
 let state = {
   concertTitle: "新規セットリスト",
-  members: initMembers(5),
+  members: initMembers(),
   groups: [],              // [{id, name, expanded}]
   songs: [],
   currentSongId: null,
@@ -2739,8 +2738,8 @@ function setMemberCount(n) {
   renderMembersPanel(); renderMemberQuickBtns(); refresh();
 }
 document.getElementById("resetMembersBtn").addEventListener("click", () => {
-  if (confirm("メンバー設定を初期状態 (5人) に戻しますか?")) {
-    state.members = initMembers(5);
+  if (confirm("メンバー設定を初期状態 (白1人) に戻しますか?")) {
+    state.members = initMembers();
     renderMembersPanel(); renderMemberQuickBtns(); refresh();
   }
 });
@@ -3878,7 +3877,7 @@ document.addEventListener("keydown", (e) => {
 // ================================================
 // MULTIPLE SETLISTS (localStorage persistence + UI)
 // ================================================
-const SETLIST_STORAGE_KEY = 'prompterStudio_data_v4';
+const SETLIST_STORAGE_KEY = 'prompterStudio_data_v5';
 let setlistsData = { setlists: [], currentSetlistId: null };
 
 function genSetlistId() { return 'sl_' + Date.now() + '_' + Math.random().toString(36).slice(2,6); }
@@ -4032,7 +4031,7 @@ function createNewSetlistFromPicker() {
   const newSl = {
     id: newId,
     name: "新規セットリスト",
-    members: initMembers(5),
+    members: initMembers(),
     songs: [],
     currentSongId: null,
     createdAt: Date.now(),
@@ -4118,7 +4117,7 @@ function createNewSetlist() {
   const newSl = {
     id: newId,
     name: "新規セットリスト",
-    members: initMembers(5),
+    members: initMembers(),
     songs: [],
     currentSongId: null,
     createdAt: Date.now(),
