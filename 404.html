@@ -1609,9 +1609,9 @@ function createBlankMember(id) {
   const idx = (id - 1) % DEFAULT_COLORS.length;
   return { name: "", color: DEFAULT_COLORS[idx] };
 }
-// Initial member state: just one white member. Users add more as needed.
+// Initial member state: just one member with the theme accent color.
 function initMembers() {
-  return { "1": { name: "", color: "#ffffff" } };
+  return { "1": { name: "", color: "#d4a27a" } };
 }
 
 // Setlist-level state
@@ -2738,7 +2738,7 @@ function setMemberCount(n) {
   renderMembersPanel(); renderMemberQuickBtns(); refresh();
 }
 document.getElementById("resetMembersBtn").addEventListener("click", () => {
-  if (confirm("メンバー設定を初期状態 (白1人) に戻しますか?")) {
+  if (confirm("メンバー設定を初期状態 (1人) に戻しますか?")) {
     state.members = initMembers();
     renderMembersPanel(); renderMemberQuickBtns(); refresh();
   }
@@ -3877,7 +3877,7 @@ document.addEventListener("keydown", (e) => {
 // ================================================
 // MULTIPLE SETLISTS (localStorage persistence + UI)
 // ================================================
-const SETLIST_STORAGE_KEY = 'prompterStudio_data_v5';
+const SETLIST_STORAGE_KEY = 'prompterStudio_data_v6';
 let setlistsData = { setlists: [], currentSetlistId: null };
 
 function genSetlistId() { return 'sl_' + Date.now() + '_' + Math.random().toString(36).slice(2,6); }
