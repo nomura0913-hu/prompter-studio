@@ -173,6 +173,10 @@
     font-family: "Helvetica Neue", "Hiragino Sans", sans-serif;
   }
   .setlist-hero-title b { font-weight: 700; color: var(--accent); }
+  .setlist-hero-desc {
+    color: var(--text-3); font-size: 13px; line-height: 1.6;
+    max-width: 520px;
+  }
   .setlist-hero-meta {
     display: flex; align-items: center; gap: 14px;
     color: var(--text-3); font-size: 12px;
@@ -681,6 +685,31 @@
     -webkit-text-fill-color: transparent; z-index: 2;
   }
   .editor.drag-target { background: rgba(212,162,122,0.04); }
+
+  /* Empty-state hint: shown only when the textarea is empty (via :placeholder-shown) */
+  .editor-empty-hint {
+    position: absolute; top: 14px; left: 22px; right: 22px;
+    pointer-events: none;
+    color: var(--text-3);
+    font-size: 13px; line-height: 1.7;
+    z-index: 3;
+    display: none;
+  }
+  .editor:placeholder-shown ~ .editor-empty-hint { display: block; }
+  .editor-empty-hint .hint-title {
+    color: var(--text-2); font-size: 14px;
+    font-weight: 600; margin-bottom: 10px;
+  }
+  .editor-empty-hint .hint-list {
+    margin: 0; padding-left: 18px;
+    list-style: disc; color: var(--text-3);
+  }
+  .editor-empty-hint .hint-list li { margin: 3px 0; }
+  .editor-empty-hint .hint-list code {
+    font-family: "SF Mono", "Menlo", monospace;
+    background: var(--bg-3); padding: 1px 6px; border-radius: 4px;
+    color: var(--text-2); font-size: 12px;
+  }
   /* Drop position indicator */
   .drop-indicator {
     position: absolute; left: 16px; right: 16px;
@@ -827,6 +856,12 @@
   .members-panel {
     flex: 1; overflow-y: auto;
     background: var(--bg-2);
+  }
+  .members-panel-desc {
+    padding: 10px 12px;
+    font-size: 11px; color: var(--text-3); line-height: 1.6;
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--border);
   }
   /* Group headers */
   .group-header {
@@ -1368,6 +1403,7 @@
     <div class="setlist-hero-left">
       <div class="setlist-hero-eyebrow">Workspace</div>
       <div class="setlist-hero-title"><b>Setlists</b></div>
+      <div class="setlist-hero-desc">カードをクリックして編集画面を開きます。右下の「+ Create New Setlist」から新規作成できます。</div>
     </div>
     <div class="setlist-hero-meta">
       <span><span id="setlistHeroCount">—</span> Total</span>
@@ -1439,20 +1475,21 @@
 
     <div class="toolbar-wrap">
       <div class="toolbar-row">
-        <span class="label">挿入</span>
-        <button class="dir"  draggable="true" data-template="[CUE] 2階に上がる">▶ CUE</button>
-        <button class="crd"  draggable="true" data-template="[コード] G | D | Em | C">♯ コード譜</button>
-        <button class="sec"  draggable="true" data-template="[INTRO 16]">INTRO</button>
-        <button class="sec"  draggable="true" data-template="[間奏 8]">間奏</button>
-        <button class="sec"  draggable="true" data-template="__OUTRO_TEMPLATE__">OUTRO</button>
-        <button class="sec"  draggable="true" data-template="[NEXT] ">NEXT</button>
+        <span class="label" title="歌詞上の任意の位置にドラッグ、またはクリックで末尾に挿入">挿入</span>
+        <button class="dir"  draggable="true" data-template="[CUE] 2階に上がる" title="演出キュー行を挿入">▶ CUE</button>
+        <button class="crd"  draggable="true" data-template="[コード] G | D | Em | C" title="コード譜行を挿入">♯ コード譜</button>
+        <button class="sec"  draggable="true" data-template="[INTRO 16]" title="イントロ表示を挿入">INTRO</button>
+        <button class="sec"  draggable="true" data-template="[間奏 8]" title="間奏表示を挿入">間奏</button>
+        <button class="sec"  draggable="true" data-template="__OUTRO_TEMPLATE__" title="アウトロ表示を挿入">OUTRO</button>
+        <button class="sec"  draggable="true" data-template="[NEXT] " title="次の曲への案内を挿入">NEXT</button>
         <button class="sec"  draggable="true" data-template="[改行]" title="ページ内に1行分の空きを入れる">↵ 改行</button>
-        <span class="drag-hint">← ドラッグ or クリックで挿入</span>
+        <span class="drag-hint">歌詞の好きな位置にドラッグ、またはクリックで挿入</span>
       </div>
       <div class="toolbar-row">
-        <span class="label" title="クリック: 歌詞の色を変える / ドラッグ: 立ち位置行に追加">立ち位置</span>
+        <span class="label" title="メンバーボタン → クリック：選択中の歌詞の色を変更／ドラッグ：立ち位置行に追加">立ち位置</span>
         <span class="btn-group" id="memberQuickBtns"></span>
         <span id="selInfo" class="selection-hint" style="display:none"></span>
+        <span class="drag-hint">クリック=歌詞の色 / ドラッグ=立ち位置行へ追加</span>
       </div>
     </div>
 
@@ -1461,7 +1498,15 @@
       <div class="editor-stack">
         <pre class="line-highlight-overlay" id="lineHighlight" aria-hidden="true"></pre>
         <pre class="highlight-overlay" id="highlight" aria-hidden="true"></pre>
-        <textarea class="editor" id="editor" spellcheck="false"></textarea>
+        <textarea class="editor" id="editor" spellcheck="false" placeholder=" "></textarea>
+        <div class="editor-empty-hint" aria-hidden="true">
+          <div class="hint-title">ここに歌詞を貼り付け、または入力してください</div>
+          <ul class="hint-list">
+            <li>空行はページ区切りになります</li>
+            <li>上の <code>CUE</code> / <code>立ち位置</code> ボタンをドラッグまたはクリックして指示を挿入</li>
+            <li>左の「曲順」から曲を選択、または「+ 曲を追加」で新規曲を作成</li>
+          </ul>
+        </div>
         <div class="drop-indicator" id="dropIndicator"></div>
       </div>
     </div>
@@ -1481,6 +1526,7 @@
       <span>メンバー</span>
       <button class="action" id="resetMembersBtn" title="初期化">初期化</button>
     </div>
+    <div class="members-panel-desc">名前と色を登録し、立ち位置指示や歌詞の色分けに使用します。</div>
     <div class="members-panel" id="membersPanel"></div>
   </div>
 
