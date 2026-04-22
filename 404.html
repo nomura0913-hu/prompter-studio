@@ -1339,10 +1339,10 @@
 
     <div class="login-body">
       <label class="form-label">Email</label>
-      <input type="email" class="form-input" id="loginEmail" value="nomura@nrs1.jp" autocomplete="email">
+      <input type="email" class="form-input" id="loginEmail" placeholder="email@example.com" autocomplete="email">
 
       <label class="form-label">Password</label>
-      <input type="password" class="form-input" id="loginPass" value="••••••••••" autocomplete="current-password">
+      <input type="password" class="form-input" id="loginPass" placeholder="••••••••" autocomplete="current-password">
 
       <button class="login-btn" id="loginBtn">Sign In</button>
       <div class="login-alt">
@@ -1362,7 +1362,7 @@
         <div class="logo-sub">Concert Cueing System</div>
       </div>
     </div>
-    <div class="user-pill"><div class="avatar">N</div><span id="setlistPageUserName">Nomura</span></div>
+    <div class="user-pill"><div class="avatar">U</div><span id="setlistPageUserName">User</span></div>
   </div>
   <div class="setlist-hero">
     <div class="setlist-hero-left">
@@ -1387,7 +1387,7 @@
   </div>
   <div class="setlist-picker">
     <button class="setlist-current-btn" id="setlistCurrentBtn" title="クリックでセットリスト切替">
-      <span class="setlist-name-display" id="currentSetlistName">SUMMER TOUR 2026 / Tokyo Dome Final</span>
+      <span class="setlist-name-display" id="currentSetlistName">新規セットリスト</span>
       <span class="chev">▾</span>
     </button>
     <div class="setlist-dropdown" id="setlistDropdown" style="display:none">
@@ -1403,8 +1403,8 @@
   </div>
   <div class="spacer"></div>
   <div class="user-pill">
-    <div class="avatar">N</div>
-    <span>野村</span>
+    <div class="avatar">U</div>
+    <span>User</span>
   </div>
   <div class="pill" id="externalBtn" title="別ウィンドウで開く → 外部モニターへドラッグ → ダブルクリックで全画面">📺 外部ディスプレイ</div>
   <div class="pill primary" id="previewBtn">▶ プレビュー</div>
@@ -1604,15 +1604,20 @@ function createMember(id) {
   const idx = (id - 1) % DEFAULT_COLORS.length;
   return { name: DEFAULT_NAMES[idx] || `メンバー${id}`, color: DEFAULT_COLORS[idx] };
 }
+// Blank member (no default name; user fills in)
+function createBlankMember(id) {
+  const idx = (id - 1) % DEFAULT_COLORS.length;
+  return { name: "", color: DEFAULT_COLORS[idx] };
+}
 function initMembers(n) {
   const m = {};
-  for (let i = 1; i <= n; i++) m[String(i)] = createMember(i);
+  for (let i = 1; i <= n; i++) m[String(i)] = createBlankMember(i);
   return m;
 }
 
 // Setlist-level state
 let state = {
-  concertTitle: "SUMMER TOUR 2026 / Tokyo Dome Final",
+  concertTitle: "新規セットリスト",
   members: initMembers(5),
   groups: [],              // [{id, name, expanded}]
   songs: [],
@@ -1739,7 +1744,7 @@ function addSong(title = "New Song", key = "", text = "", lineColors = {}, opts 
   return song;
 }
 
-seedSongs();
+// seedSongs() — demo data disabled in production. Users create their own.
 
 // ================================================
 // ELEMENTS
@@ -3873,7 +3878,7 @@ document.addEventListener("keydown", (e) => {
 // ================================================
 // MULTIPLE SETLISTS (localStorage persistence + UI)
 // ================================================
-const SETLIST_STORAGE_KEY = 'prompterStudio_data_v3';
+const SETLIST_STORAGE_KEY = 'prompterStudio_data_v4';
 let setlistsData = { setlists: [], currentSetlistId: null };
 
 function genSetlistId() { return 'sl_' + Date.now() + '_' + Math.random().toString(36).slice(2,6); }
