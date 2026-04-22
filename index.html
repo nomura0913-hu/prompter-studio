@@ -2295,6 +2295,11 @@ function buildSinglePageHTML(page, members, opts) {
   <\/script></body></html>`;
 }
 
+// Tracks the last page idx we auto-scrolled the thumbnail list to.
+// Used to skip auto-scroll on every keystroke (so typing in the lyrics editor
+// doesn't yank the preview thumbnails back to the top).
+let _lastAutoScrolledPageIdx = -1;
+
 function renderPreviewPane(pages) {
   const list = document.getElementById("previewList");
   // clamp current idx
@@ -2369,13 +2374,19 @@ function renderPreviewPane(pages) {
   document.getElementById("navPrev").disabled = (state.currentPageIdx === 0);
   document.getElementById("navNext").disabled = (state.currentPageIdx >= pages.length - 1);
 
-  // Auto-scroll the current card into view
-  requestAnimationFrame(() => {
-    const currentCard = list.querySelector(".page-card.current");
-    if (currentCard) {
-      currentCard.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
-    }
-  });
+  // Auto-scroll the current card into view ONLY when the current page index has actually
+  // changed (e.g. user clicked a thumbnail, used the nav buttons, or currentPageIdx moved).
+  // Without this guard, every keystroke in the lyrics editor would snap the thumbnail list
+  // back to the top, which is what the user reported as annoying.
+  if (_lastAutoScrolledPageIdx !== state.currentPageIdx) {
+    _lastAutoScrolledPageIdx = state.currentPageIdx;
+    requestAnimationFrame(() => {
+      const currentCard = list.querySelector(".page-card.current");
+      if (currentCard) {
+        currentCard.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+      }
+    });
+  }
 }
 
 // ================================================
