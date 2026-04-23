@@ -1930,7 +1930,7 @@ function parseText(text, lineColors = {}) {
       let chordPrefixLen = 0;
       const chm = txt.match(/^【([^【】]+)】\s*(.*)$/);
       if (chm) { chord = chm[1].trim(); chordPrefixLen = chm[0].length - chm[2].length; txt = chm[2]; }
-      const block = { kind: "lyric", text: txt };
+      const block = { kind: "lyric", text: txt, srcLineIdx: lineIdx };
       if (color) {
         if (isSpansArray(color)) {
           block.color = color.map(s => ({
@@ -1961,7 +1961,7 @@ function parseText(text, lineColors = {}) {
       } else if (currentChord && segments.length === 0) {
         segments.push({ chord: currentChord, text: "" });
       }
-      const block = { kind: "lyric", segments };
+      const block = { kind: "lyric", segments, srcLineIdx: lineIdx };
       // Only simple colors (no spans) supported for multi-chord lines
       if (color && !isSpansArray(color)) block.color = color;
       cur.push(block);
@@ -5368,20 +5368,45 @@ function commitIframeEdit() {
   const baseText = (rawPage && rawPage.type === "page") ? blocksToEditableText(rawPage.blocks) : "";
   const baseBlocks = (rawPage && rawPage.type === "page") ? rawPage.blocks : [];
 
-  // Compare BLOCK STRUCTURES (text + colors + chords + stage positions), not just text.
-  // Earlier this only compared blocksToEditableText() on both sides, which stripped
-  // color info — so "color-only" changes in the overlay editor were treated as
-  // "no change vs base", the override was discarded, and the newly applied color
-  // disappeared a moment later when refresh() re-rendered from the base.
-  if (overlayBlocksEqual(newBlocks, baseBlocks)) {
-    // Truly no change vs the left-text base → remove the override
+  // --- Decide where to write the edit back to ---
+  // If the TEXT is unchanged (user only changed colors / chords / stage positions),
+  // write straight back into the main song state (song.lineColors) so the left-hand
+  // textarea, the thumbnail, the main preview, and the overlay editor all stay in
+  // sync. Overrides are only used when the overlay editor diverges from the base
+  // text (e.g. user rewrote a line inside the overlay).
+  const textsMatch = blocksToEditableText(newBlocks) === baseText;
+  if (textsMatch) {
+    // Drop any old override for this page first — we're writing back to the main state.
+    if (song.pageOverrides && song.pageOverrides[oe.pageIdx] != null) {
+      delete song.pageOverrides[oe.pageIdx];
+      if (Object.keys(song.pageOverrides).length === 0) delete song.pageOverrides;
+    }
+    // Map each lyric block's color back to song.lineColors using srcLineIdx.
+    // Block order in newBlocks matches baseBlocks (since texts match), so we can
+    // just pair them by index and read srcLineIdx off the base block.
+    if (!song.lineColors) song.lineColors = {};
+    newBlocks.forEach((nb, idx) => {
+      const bb = baseBlocks[idx];
+      if (!bb || nb.kind !== "lyric" || bb.kind !== "lyric") return;
+      const srcIdx = bb.srcLineIdx;
+      if (typeof srcIdx !== "number") return;
+      if (nb.color == null) {
+        delete song.lineColors[srcIdx];
+      } else {
+        song.lineColors[srcIdx] = nb.color;
+      }
+    });
+  } else if (overlayBlocksEqual(newBlocks, baseBlocks)) {
+    // Truly no change vs base (text + colors identical) → drop override
     if (song.pageOverrides && song.pageOverrides[oe.pageIdx] != null) {
       delete song.pageOverrides[oe.pageIdx];
       if (Object.keys(song.pageOverrides).length === 0) delete song.pageOverrides;
     }
   } else {
+    // Text diverged from the left editor → keep an override for this page so the
+    // overlay edits aren't lost. (Text propagation back to the left textarea is a
+    // bigger refactor; overrides keep thumbnail + main preview in sync here.)
     if (!song.pageOverrides) song.pageOverrides = {};
-    // Store as blocks to preserve partial color spans
     song.pageOverrides[oe.pageIdx] = { base: baseText, blocks: newBlocks };
   }
   refresh();
