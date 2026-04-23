@@ -3057,12 +3057,45 @@ function refresh() {
       const ov = song.pageOverrides?.[i];
       if (ov == null || p.type !== "page") return;
       if (ov.blocks && Array.isArray(ov.blocks)) {
-        p.blocks = JSON.parse(JSON.stringify(ov.blocks));
+        // AUTO-MIGRATE: if the override's blocks represent only color/chord
+        // changes (i.e. the text content matches the page's rawBase), move
+        // colors into song.lineColors and drop the override — that way the
+        // left textarea, thumbnail, and main preview all render from the
+        // same source (lineColors), instead of the textarea rendering from
+        // lineColors while the thumbnail uses a separate override.
+        let migrated = false;
+        try {
+          const ovText = blocksToEditableText(ov.blocks);
+          if (ovText === p._rawBase && Array.isArray(p.blocks)) {
+            if (!song.lineColors) song.lineColors = {};
+            ov.blocks.forEach((b, idx) => {
+              if (b.kind !== "lyric") return;
+              const baseBlock = p.blocks[idx];
+              if (!baseBlock || baseBlock.kind !== "lyric") return;
+              const srcIdx = baseBlock.srcLineIdx;
+              if (typeof srcIdx !== "number") return;
+              if (b.color == null) delete song.lineColors[srcIdx];
+              else song.lineColors[srcIdx] = b.color;
+              // Also reflect the color onto the in-memory block so the
+              // current render uses it too (without a second parseText pass).
+              if (b.color == null) delete baseBlock.color;
+              else baseBlock.color = b.color;
+            });
+            delete song.pageOverrides[i];
+            migrated = true;
+          }
+        } catch (_) {}
+        if (!migrated) {
+          p.blocks = JSON.parse(JSON.stringify(ov.blocks));
+        }
       } else if (ov.text != null) {
         const newBlocks = editableTextToBlocks(ov.text);
         if (newBlocks.length) p.blocks = newBlocks;
       }
     });
+    if (song.pageOverrides && Object.keys(song.pageOverrides).length === 0) {
+      delete song.pageOverrides;
+    }
   }
   // Attach overlays (keyed by pageIdx). Supports both the legacy Array form
   // (`song.overlays[i] = [elements]`) and the new form
