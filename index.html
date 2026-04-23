@@ -1870,7 +1870,7 @@ function parseText(text, lineColors = {}) {
       continue;
     }
     m = line.match(/^\[(?:CUE|指示)\]\s*(.+)$/i);
-    if (m) { startPage(); cur.push({ kind: "direction", text: m[1] }); continue; }
+    if (m) { startPage(); cur.push({ kind: "direction", text: m[1], srcLineIdx: lineIdx }); continue; }
     // [立ち位置] / [ステージ] — flexible parsing (name + optional number, any separators)
     m = line.match(/^\[(?:立ち位置|ステージ)\]\s*(.+)$/);
     if (m) {
@@ -1904,14 +1904,14 @@ function parseText(text, lineColors = {}) {
       } else if (allAuto && sm.length === 1) { sm[0].pos = 0; }
       // Fill null positions with 0
       sm.forEach(x => { if (x.pos === null) x.pos = 0; });
-      cur.push({ kind: "stage", members: sm });
+      cur.push({ kind: "stage", members: sm, srcLineIdx: lineIdx });
       continue;
     }
     m = line.match(/^\[コード\]\s*(.+)$/);
-    if (m) { startPage(); cur.push({ kind: "chords", chords: m[1].split(/[\s,、|｜]+/).filter(Boolean) }); continue; }
+    if (m) { startPage(); cur.push({ kind: "chords", chords: m[1].split(/[\s,、|｜]+/).filter(Boolean), srcLineIdx: lineIdx }); continue; }
     // [改行] or [GAP N] — insert vertical blank space WITHIN the page (not a page break)
     m = line.match(/^\[(?:改行|GAP|BR)(?:\s+(\d+(?:\.\d+)?))?\]$/i);
-    if (m) { startPage(); cur.push({ kind: "gap", size: m[1] ? parseFloat(m[1]) : 4 }); continue; }
+    if (m) { startPage(); cur.push({ kind: "gap", size: m[1] ? parseFloat(m[1]) : 4, srcLineIdx: lineIdx }); continue; }
     // Lyric line — color comes from lineColors map (no more @N in text)
     // Parse ALL 【chord】 markers inline (Japanese corner brackets only,
     // so regular ()／（） in lyrics are preserved as-is)
@@ -2755,8 +2755,10 @@ function renderMembersPanel() {
       // If the member's short label changed (e.g. "1" → "田"), rewrite any
       // existing [立ち位置]/[ステージ] references in the current song text so
       // the user sees the new name in place of the ID they previously dropped.
+      // Passes memberId so the rewriter can skip work when oldLabel is shared
+      // with another member (avoids collateral edits to the other member's refs).
       if (oldLabel !== newLabel) {
-        rewriteStageLabelInEditor(oldLabel, newLabel);
+        rewriteStageLabelInEditor(id, oldLabel, newLabel);
       }
 
       const dot = panel.querySelector('.dot[data-mid="' + id + '"]');
@@ -2775,10 +2777,19 @@ function renderMembersPanel() {
       }
       const m = state.members[id];
       if (!confirm(`メンバー「${m.name || id}」を削除しますか?`)) return;
+      const oldLabel = (m.name || "").charAt(0) || id;
       delete state.members[id];
+      // Clean up references to the deleted member across ALL songs in the setlist:
+      //  - song.lineColors entries pointing at this id (or containing it in a
+      //    span/gradient array)
+      //  - [立ち位置]/[ステージ] references in song.text using this id or its
+      //    initial (so orphaned stage positions don't linger)
+      //  - block-level colors/stage members inside song.pageOverrides
+      purgeMemberFromAllSongs(id, oldLabel);
       renderMembersPanel();
       renderMemberQuickBtns();
       refresh();
+      persistCurrent();
     });
   });
   // Group toggle (expand/collapse)
@@ -3033,39 +3044,42 @@ function refresh() {
   // If the current base differs from the saved base (user edited main textarea),
   // drop the override so left-text changes propagate.
   if (song && song.pageOverrides) {
+    // Re-key drifted overrides so they follow their content when page
+    // boundaries shift (e.g. user inserts/removes blank lines and the
+    // override's page index changes). Entries whose base text no longer
+    // matches ANY current page are dropped.
+    song.pageOverrides = remapPageKeyedByBase(song.pageOverrides, pages, ov => ov && ov.base);
+    if (Object.keys(song.pageOverrides).length === 0) delete song.pageOverrides;
+
+    // Apply overrides to pages. Legacy entries (string, or without .base) were
+    // dropped by the re-key above because they couldn't be matched safely.
     pages.forEach((p, i) => {
-      const ov = song.pageOverrides[i];
+      const ov = song.pageOverrides?.[i];
       if (ov == null || p.type !== "page") return;
-      // Legacy string format → drop (cannot safely detect base divergence)
-      if (typeof ov === "string") {
-        delete song.pageOverrides[i];
-        return;
-      }
-      if (ov.base === p._rawBase) {
-        // Base unchanged: apply override
-        if (ov.blocks && Array.isArray(ov.blocks)) {
-          // Block-based override (preserves partial color spans) — preferred format
-          p.blocks = JSON.parse(JSON.stringify(ov.blocks));
-        } else if (ov.text != null) {
-          // Text-based override (legacy format)
-          const newBlocks = editableTextToBlocks(ov.text);
-          if (newBlocks.length) p.blocks = newBlocks;
-        }
-      } else {
-        // Base changed (user edited left textarea affecting this page) → drop override
-        delete song.pageOverrides[i];
+      if (ov.blocks && Array.isArray(ov.blocks)) {
+        p.blocks = JSON.parse(JSON.stringify(ov.blocks));
+      } else if (ov.text != null) {
+        const newBlocks = editableTextToBlocks(ov.text);
+        if (newBlocks.length) p.blocks = newBlocks;
       }
     });
-    // Clean up if empty
-    if (song.pageOverrides && Object.keys(song.pageOverrides).length === 0) {
-      delete song.pageOverrides;
-    }
   }
-  // Attach overlays (keyed by pageIdx in song.overlays)
+  // Attach overlays (keyed by pageIdx). Supports both the legacy Array form
+  // (`song.overlays[i] = [elements]`) and the new form
+  // (`song.overlays[i] = { base, elements }`) which lets us re-key overlays
+  // that drift along with their page content.
   if (song && song.overlays) {
+    song.overlays = remapPageKeyedByBase(
+      song.overlays,
+      pages,
+      ov => (ov && !Array.isArray(ov) && typeof ov.base === "string") ? ov.base : null
+    );
+    if (Object.keys(song.overlays).length === 0) delete song.overlays;
     pages.forEach((p, i) => {
-      const ov = song.overlays[i];
-      if (ov && ov.length) p.overlay = ov;
+      const ov = song.overlays?.[i];
+      if (!ov) return;
+      const els = Array.isArray(ov) ? ov : ov.elements;
+      if (els && els.length) p.overlay = els;
     });
   }
   renderPreviewPane(pages);
@@ -3204,17 +3218,193 @@ function insertFullLineAtCursor(text) {
 // ================================================
 // DRAG + CLICK buttons
 // ================================================
+// Re-key a {pageIdx: entry} map so entries follow their original page's
+// content even after the user adds/removes blank lines or section markers
+// (which shift page indices).
+//
+// `getBase(entry)` should return the base-text that was stored alongside the
+// entry at save time, or null/undefined if the entry has no base (legacy
+// format). Legacy entries are kept at their original index if that index
+// still points to a valid page; otherwise they're dropped.
+function remapPageKeyedByBase(map, pages, getBase) {
+  const result = {};
+  const unclaimed = { ...map };
+
+  // Pass 1: entries already at the right index (base matches current page)
+  pages.forEach((p, i) => {
+    if (p.type !== "page") return;
+    const ov = unclaimed[i];
+    if (ov == null) return;
+    const base = getBase(ov);
+    if (typeof base === "string" && base === p._rawBase) {
+      result[i] = ov;
+      delete unclaimed[i];
+    }
+  });
+
+  // Pass 2: entries whose index no longer matches — try to find their new home
+  pages.forEach((p, i) => {
+    if (result[i] || p.type !== "page") return;
+    for (const k of Object.keys(unclaimed)) {
+      const ov = unclaimed[k];
+      const base = getBase(ov);
+      if (typeof base === "string" && base === p._rawBase) {
+        result[i] = ov;
+        delete unclaimed[k];
+        break;
+      }
+    }
+  });
+
+  // Pass 3: legacy entries (no base) — preserve at their original index if
+  // that still points to a valid page; otherwise drop.
+  for (const k of Object.keys(unclaimed)) {
+    const idx = parseInt(k);
+    if (!isFinite(idx)) continue;
+    const ov = unclaimed[k];
+    const base = getBase(ov);
+    if (base != null) continue; // had a base but didn't match anywhere — drop
+    if (pages[idx] && pages[idx].type === "page") {
+      result[idx] = ov;
+    }
+  }
+
+  return result;
+}
+
+// Remove all references to a deleted member across every song in this setlist.
+// Keeps the data model consistent so that stale ids don't silently render as
+// white after colorStyleFor's fallback, and [立ち位置] lines don't keep dangling
+// references to a member that no longer exists.
+function purgeMemberFromAllSongs(memberId, oldLabel) {
+  const escId = String(memberId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escLbl = oldLabel ? String(oldLabel).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : null;
+
+  // Removes the deleted member from a color spec (string id, array of ids for
+  // a gradient, or an array of {s,e,c} spans). Returns the cleaned spec, or
+  // null/undefined if nothing's left.
+  function cleanColorSpec(spec) {
+    if (spec == null) return spec;
+    if (typeof spec === "string") {
+      return spec === memberId ? null : spec;
+    }
+    if (Array.isArray(spec)) {
+      if (spec.length > 0 && typeof spec[0] === "object") {
+        // Spans array
+        const cleaned = spec
+          .map(s => ({ ...s, c: cleanColorSpec(s.c) }))
+          .filter(s => s.c != null);
+        return cleaned.length ? cleaned : null;
+      }
+      // Gradient (array of ids)
+      const cleaned = spec.filter(x => x !== memberId);
+      if (cleaned.length === 0) return null;
+      if (cleaned.length === 1) return cleaned[0];
+      return cleaned;
+    }
+    return spec;
+  }
+
+  function stripFromStageLineContent(content) {
+    // Drop any "<id>:<num>" numeric-ID references for this member
+    let out = content.replace(
+      new RegExp(`(^|[\\s,、])${escId}\\s*[:：]\\s*-?\\d+(?:\\.\\d+)?(?=[\\s,、]|$)`, "g"),
+      "$1"
+    );
+    // Drop any "<label><maybe colon><maybe num>" initial-form references
+    if (escLbl) {
+      out = out.replace(
+        new RegExp(`(^|[\\s,、])${escLbl}(\\s*[:：]?\\s*-?\\d+(?:\\.\\d+)?)?(?=[\\s,、]|$)`, "g"),
+        "$1"
+      );
+    }
+    // Collapse any stray double delimiters / leading/trailing separators
+    return out.replace(/[,、]\s*(?=[,、])/g, "").replace(/^[,\s、]+|[,\s、]+$/g, "").replace(/\s{2,}/g, " ");
+  }
+
+  function cleanTextForStageLines(text) {
+    if (!text) return text;
+    const lines = text.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const kw = lines[i].match(/^(\s*\[(?:立ち位置|ステージ)\]\s*)(.*)$/);
+      if (!kw) continue;
+      const stripped = stripFromStageLineContent(kw[2]);
+      lines[i] = stripped ? (kw[1] + stripped) : ""; // empty → drop line content
+    }
+    return lines.join("\n");
+  }
+
+  (state.songs || []).forEach(song => {
+    // 1) Text: strip from [立ち位置] lines
+    song.text = cleanTextForStageLines(song.text || "");
+    // 2) lineColors: clean each entry
+    if (song.lineColors) {
+      for (const k of Object.keys(song.lineColors)) {
+        const cleaned = cleanColorSpec(song.lineColors[k]);
+        if (cleaned == null) delete song.lineColors[k];
+        else song.lineColors[k] = cleaned;
+      }
+    }
+    // 3) pageOverrides: clean block-level colors + stage members
+    if (song.pageOverrides) {
+      for (const k of Object.keys(song.pageOverrides)) {
+        const ov = song.pageOverrides[k];
+        if (!ov || !Array.isArray(ov.blocks)) continue;
+        ov.blocks.forEach(b => {
+          if (b.kind === "lyric" && b.color != null) {
+            const c = cleanColorSpec(b.color);
+            if (c == null) delete b.color; else b.color = c;
+          }
+          if (b.kind === "stage" && Array.isArray(b.members)) {
+            b.members = b.members.filter(mm => mm.id !== memberId);
+          }
+        });
+      }
+    }
+  });
+
+  // Reflect song.text changes back into the live editor if it belongs to the
+  // currently-loaded song.
+  const cur = getCurrentSong();
+  if (cur && typeof cur.text === "string") {
+    editor.value = cur.text;
+  }
+}
+
 // Rewrite member labels inside [立ち位置]/[ステージ] lines of the current song
 // text. Called when a member's name changes so existing references (that were
 // dropped in while the member was unnamed — e.g. "1:0") update to the new name
 // automatically (→ "田:0"), with the correct color applied via the normal render.
-function rewriteStageLabelInEditor(oldLabel, newLabel) {
+//
+// Handles collisions with other members' initials:
+//   - If oldLabel is still shared with another member, we skip the rewrite
+//     entirely to avoid accidentally changing that other member's refs.
+//   - If newLabel collides with another member's initial, we use the numeric
+//     member ID (e.g. "2:0") instead of the ambiguous initial.
+function rewriteStageLabelInEditor(memberId, oldLabel, newLabel) {
   if (!oldLabel || !newLabel || oldLabel === newLabel) return;
+
+  const otherLabels = Object.keys(state.members)
+    .filter(id => id !== memberId)
+    .map(id => ((state.members[id].name || "").charAt(0) || id));
+
+  // If another member still uses oldLabel, a blanket rewrite would also change
+  // THEIR references. Safer to leave the text alone and let the user edit
+  // manually. (After this member changes its label, the ambiguous refs in the
+  // text will now point at the OTHER member — which matches what the user sees.)
+  if (otherLabels.includes(oldLabel)) return;
+
+  // If the new label collides with another member, use numeric-ID form instead
+  const finalLabel = otherLabels.includes(newLabel) ? String(memberId) : newLabel;
+  // When using numeric-ID form we must write a colon separator (e.g. "1:0"),
+  // otherwise "10" parses as the number ten.
+  const needsColon = /^\d+$/.test(finalLabel);
+
   const esc = String(oldLabel).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   // Match: (delimiter/start) + oldLabel + (optional colon/whitespace + optional signed number) + (delimiter/end)
   // The trailing lookahead prevents accidentally matching inside a longer token.
   const refRe = new RegExp(
-    `(^|[\\s,、])${esc}(\\s*[:：]?\\s*-?\\d+(?:\\.\\d+)?)?(?=[\\s,、]|$)`,
+    `(^|[\\s,、])${esc}(\\s*[:：]?\\s*)(-?\\d+(?:\\.\\d+)?)?(?=[\\s,、]|$)`,
     "g"
   );
   const lines = editor.value.split(/\r?\n/);
@@ -3224,7 +3414,13 @@ function rewriteStageLabelInEditor(oldLabel, newLabel) {
     if (!kw) continue;
     const prefix = kw[1];
     const content = kw[2];
-    const next = content.replace(refRe, (_, delim, tail) => `${delim}${newLabel}${tail || ""}`);
+    const next = content.replace(refRe, (_, delim, sep, num) => {
+      const posPart = num != null ? num : "";
+      const separator = needsColon
+        ? ":"
+        : (posPart ? (sep && sep.trim() ? sep : "") : "");
+      return `${delim}${finalLabel}${separator}${posPart}`;
+    });
     if (next !== content) {
       lines[i] = prefix + next;
       changed = true;
@@ -4543,7 +4739,9 @@ function openOverlayEditor(pageIdx) {
   if (!song || !pages[pageIdx]) return;
   oe.songId = song.id;
   oe.pageIdx = pageIdx;
-  const existing = (song.overlays && song.overlays[pageIdx]) || [];
+  // Support both legacy Array form and new {base, elements} form
+  const raw = song.overlays && song.overlays[pageIdx];
+  const existing = Array.isArray(raw) ? raw : (raw && raw.elements) || [];
   oe.elements = JSON.parse(JSON.stringify(existing));
   oe.nextId = oe.elements.reduce((m,e) => Math.max(m, e._id||0), 0) + 1;
   oe.elements.forEach(e => { if (!e._id) e._id = oe.nextId++; });
@@ -5025,8 +5223,14 @@ function saveOverlay() {
   const clean = oe.elements.map(el => {
     const c = { ...el }; delete c._id; return c;
   });
-  if (clean.length === 0) delete song.overlays[oe.pageIdx];
-  else song.overlays[oe.pageIdx] = clean;
+  if (clean.length === 0) {
+    delete song.overlays[oe.pageIdx];
+  } else {
+    // New format: store base text alongside so overlays can follow their page
+    // when page indices shift later (refresh re-keys via remapPageKeyedByBase).
+    const base = pages[oe.pageIdx] && pages[oe.pageIdx]._rawBase;
+    song.overlays[oe.pageIdx] = { base: base || "", elements: clean };
+  }
   refresh();
   persistCurrent();
   closeOverlayEditor();
@@ -5369,43 +5573,68 @@ function commitIframeEdit() {
   const baseBlocks = (rawPage && rawPage.type === "page") ? rawPage.blocks : [];
 
   // --- Decide where to write the edit back to ---
-  // If the TEXT is unchanged (user only changed colors / chords / stage positions),
-  // write straight back into the main song state (song.lineColors) so the left-hand
-  // textarea, the thumbnail, the main preview, and the overlay editor all stay in
-  // sync. Overrides are only used when the overlay editor diverges from the base
-  // text (e.g. user rewrote a line inside the overlay).
-  const textsMatch = blocksToEditableText(newBlocks) === baseText;
-  if (textsMatch) {
-    // Drop any old override for this page first — we're writing back to the main state.
+  // Preferred path: write edits (text AND colors) straight back into editor.value
+  // + song.lineColors, so the left textarea / thumbnails / main preview all stay
+  // in sync. To do that we need the source-line range of this page in the raw
+  // editor text, which we read off the srcLineIdx that parseText tags each block
+  // with. Fallback: if we can't map (e.g. a page with no srcLineIdx on any
+  // block), store the edit as a per-page override.
+  const srcIdxs = baseBlocks.map(b => (b && typeof b.srcLineIdx === "number") ? b.srcLineIdx : null).filter(x => x != null);
+  const canMapToEditor = srcIdxs.length > 0;
+  const blocksUnchanged = overlayBlocksEqual(newBlocks, baseBlocks);
+
+  if (blocksUnchanged) {
+    // Nothing really changed → drop any stale override for this page.
     if (song.pageOverrides && song.pageOverrides[oe.pageIdx] != null) {
       delete song.pageOverrides[oe.pageIdx];
       if (Object.keys(song.pageOverrides).length === 0) delete song.pageOverrides;
     }
-    // Map each lyric block's color back to song.lineColors using srcLineIdx.
-    // Block order in newBlocks matches baseBlocks (since texts match), so we can
-    // just pair them by index and read srcLineIdx off the base block.
-    if (!song.lineColors) song.lineColors = {};
-    newBlocks.forEach((nb, idx) => {
-      const bb = baseBlocks[idx];
-      if (!bb || nb.kind !== "lyric" || bb.kind !== "lyric") return;
-      const srcIdx = bb.srcLineIdx;
-      if (typeof srcIdx !== "number") return;
-      if (nb.color == null) {
-        delete song.lineColors[srcIdx];
-      } else {
-        song.lineColors[srcIdx] = nb.color;
+  } else if (canMapToEditor) {
+    const firstLine = Math.min(...srcIdxs);
+    const lastLine  = Math.max(...srcIdxs);
+    const origLines = editor.value.split(/\r?\n/);
+    const newPageText = blocksToEditableText(newBlocks);
+    const newPageLines = newPageText.split(/\r?\n/);
+    const oldLineCount = lastLine - firstLine + 1;
+    const newLineCount = newPageLines.length;
+    const delta = newLineCount - oldLineCount;
+
+    // Rebuild song.lineColors:
+    //  - Keep entries for lines BEFORE this page as-is.
+    //  - Drop entries for lines WITHIN this page (we'll rebuild from newBlocks).
+    //  - Shift entries for lines AFTER this page by the line-count delta.
+    const nextLineColors = {};
+    if (song.lineColors) {
+      for (const k of Object.keys(song.lineColors)) {
+        const idx = parseInt(k);
+        if (!isFinite(idx)) continue;
+        if (idx < firstLine) nextLineColors[idx] = song.lineColors[k];
+        else if (idx > lastLine) nextLineColors[idx + delta] = song.lineColors[k];
+        // [firstLine, lastLine]: discarded; rebuilt below.
       }
+    }
+    // Apply new colors from newBlocks. newBlocks order matches newPageLines 1:1
+    // (blocksToEditableText emits exactly one line per block), so block at index
+    // i maps to editor line (firstLine + i).
+    newBlocks.forEach((nb, i) => {
+      if (nb.kind !== "lyric" || nb.color == null) return;
+      const editorLine = firstLine + i;
+      nextLineColors[editorLine] = nb.color;
     });
-  } else if (overlayBlocksEqual(newBlocks, baseBlocks)) {
-    // Truly no change vs base (text + colors identical) → drop override
+    song.lineColors = nextLineColors;
+
+    // Splice the new page text into editor.value
+    const splicedLines = origLines.slice(0, firstLine).concat(newPageLines).concat(origLines.slice(lastLine + 1));
+    editor.value = splicedLines.join("\n");
+    song.text = editor.value;
+
+    // This page is now expressed entirely in editor.value — drop any override.
     if (song.pageOverrides && song.pageOverrides[oe.pageIdx] != null) {
       delete song.pageOverrides[oe.pageIdx];
       if (Object.keys(song.pageOverrides).length === 0) delete song.pageOverrides;
     }
   } else {
-    // Text diverged from the left editor → keep an override for this page so the
-    // overlay edits aren't lost. (Text propagation back to the left textarea is a
-    // bigger refactor; overrides keep thumbnail + main preview in sync here.)
+    // No way to map back to editor lines → store per-page override as a fallback.
     if (!song.pageOverrides) song.pageOverrides = {};
     song.pageOverrides[oe.pageIdx] = { base: baseText, blocks: newBlocks };
   }
