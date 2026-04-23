@@ -5274,6 +5274,27 @@ function startIframeTextEdit(el, clickEvent) {
   });
 }
 
+// Deep equality for two block arrays used by the overlay editor. Compares text,
+// chord, colors (including partial spans), and — for stage blocks — member/pos
+// pairs. Used so "color-only" edits in the overlay editor are NOT treated as
+// "no change vs base" (which would discard the newly applied color).
+function overlayBlocksEqual(a, b) {
+  if (!a || !b) return a === b;
+  if (a.length !== b.length) return false;
+  const norm = v => (v == null ? null : JSON.stringify(v));
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i], y = b[i];
+    if (x.kind !== y.kind) return false;
+    if ((x.text || "") !== (y.text || "")) return false;
+    if ((x.chord || "") !== (y.chord || "")) return false;
+    if (norm(x.color) !== norm(y.color)) return false;
+    if (x.kind === "stage" && norm(x.members) !== norm(y.members)) return false;
+    if (x.kind === "chords" && norm(x.chords) !== norm(y.chords)) return false;
+    if (x.kind === "gap" && (x.size || 0) !== (y.size || 0)) return false;
+  }
+  return true;
+}
+
 function commitIframeEdit() {
   const iframe = document.getElementById("oeBgFrame");
   const doc = iframe.contentDocument;
@@ -5345,10 +5366,15 @@ function commitIframeEdit() {
   const rawPages = parseText(editor.value, song.lineColors || {});
   const rawPage = rawPages[oe.pageIdx];
   const baseText = (rawPage && rawPage.type === "page") ? blocksToEditableText(rawPage.blocks) : "";
-  const newAsText = blocksToEditableText(newBlocks);
+  const baseBlocks = (rawPage && rawPage.type === "page") ? rawPage.blocks : [];
 
-  if (newAsText === baseText) {
-    // No change vs the left-text base → remove the override
+  // Compare BLOCK STRUCTURES (text + colors + chords + stage positions), not just text.
+  // Earlier this only compared blocksToEditableText() on both sides, which stripped
+  // color info — so "color-only" changes in the overlay editor were treated as
+  // "no change vs base", the override was discarded, and the newly applied color
+  // disappeared a moment later when refresh() re-rendered from the base.
+  if (overlayBlocksEqual(newBlocks, baseBlocks)) {
+    // Truly no change vs the left-text base → remove the override
     if (song.pageOverrides && song.pageOverrides[oe.pageIdx] != null) {
       delete song.pageOverrides[oe.pageIdx];
       if (Object.keys(song.pageOverrides).length === 0) delete song.pageOverrides;
