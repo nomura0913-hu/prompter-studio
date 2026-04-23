@@ -2356,7 +2356,28 @@ function renderPreviewPane(pages) {
     card.addEventListener("click", (e) => {
       if (e.target.closest(".overlay-edit-btn")) return;
       state.currentPageIdx = i;
-      renderPreviewPane(pages);
+      // Light-weight update: toggle the ".current" class and move the LIVE badge
+      // WITHOUT destroying & recreating the card DOM nodes.
+      // Rebuilding the cards on single-click made the browser see the second
+      // click on a freshly-created element, which prevents it from generating
+      // a dblclick event — so double-clicking to open the overlay editor stopped
+      // working.
+      list.querySelectorAll(".page-card").forEach((c, idx) => {
+        const isCur = idx === i;
+        c.classList.toggle("current", isCur);
+        const existingBadge = c.querySelector(".live-badge");
+        if (isCur && !existingBadge) {
+          const badge = document.createElement("div");
+          badge.className = "live-badge";
+          badge.textContent = "● LIVE";
+          // Insert before the iframe so it overlays consistently like the full render
+          const frame = c.querySelector(".page-card-frame");
+          if (frame) c.insertBefore(badge, frame); else c.appendChild(badge);
+        } else if (!isCur && existingBadge) {
+          existingBadge.remove();
+        }
+      });
+      updateLiveHeader(pages);
       // Broadcast to external window if open
       try { mainChannel?.postMessage({ type: "goto", page: i }); } catch(e){}
     });
@@ -2370,7 +2391,13 @@ function renderPreviewPane(pages) {
   });
   document.getElementById("pageCountStat").textContent = `${pages.length} ページ`;
 
-  // Update LIVE indicator at top
+  updateLiveHeader(pages);
+}
+
+// Update the LIVE header (current page number / label / nav buttons) and
+// optionally scroll the current card into view. Extracted so that single-click
+// on a thumbnail can update these without re-rendering the entire card list.
+function updateLiveHeader(pages) {
   const curPage = pages[state.currentPageIdx];
   let label = "";
   if (curPage) {
@@ -2384,16 +2411,16 @@ function renderPreviewPane(pages) {
   document.getElementById("liveNum").textContent = state.currentPageIdx + 1;
   document.getElementById("liveTotal").textContent = pages.length;
   document.getElementById("liveLabel").textContent = label;
-  // Enable/disable nav buttons
   document.getElementById("navPrev").disabled = (state.currentPageIdx === 0);
   document.getElementById("navNext").disabled = (state.currentPageIdx >= pages.length - 1);
 
   // Auto-scroll the current card into view ONLY when the current page index has actually
   // changed (e.g. user clicked a thumbnail, used the nav buttons, or currentPageIdx moved).
   // Without this guard, every keystroke in the lyrics editor would snap the thumbnail list
-  // back to the top, which is what the user reported as annoying.
+  // back to the top.
   if (_lastAutoScrolledPageIdx !== state.currentPageIdx) {
     _lastAutoScrolledPageIdx = state.currentPageIdx;
+    const list = document.getElementById("previewList");
     requestAnimationFrame(() => {
       const currentCard = list.querySelector(".page-card.current");
       if (currentCard) {
