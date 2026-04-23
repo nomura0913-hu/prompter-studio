@@ -4792,6 +4792,11 @@ function openOverlayEditor(pageIdx) {
   renderOeElements();
   document.getElementById("overlayEditor").classList.add("open");
   renderOeMembersBar();
+  // Clear focus from any input that was focused before (login form, etc.) so
+  // our Delete/Backspace/Esc key handlers aren't suppressed by a stale input.
+  if (document.activeElement && typeof document.activeElement.blur === "function") {
+    document.activeElement.blur();
+  }
 }
 
 function closeOverlayEditor() {
@@ -5746,10 +5751,21 @@ document.getElementById("oeOverlay").addEventListener("mousedown", (e) => {
 });
 // Keyboard: Delete selected, Esc to close
 document.addEventListener("keydown", (e) => {
-  if (!document.getElementById("overlayEditor").classList.contains("open")) return;
+  const overlay = document.getElementById("overlayEditor");
+  if (!overlay.classList.contains("open")) return;
   const active = document.activeElement;
-  // If currently inline-editing a text element, or focused on any form field, don't hijack keys
-  if (active && (active.isContentEditable || active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) {
+  // While the overlay editor is open it's a modal — ignore focus that's
+  // outside it (e.g. a stale login email field). Only skip key hijacking
+  // when the user is actively typing in a property-panel field *inside*
+  // the overlay editor itself.
+  const insideOverlay = active && overlay.contains(active);
+  // Also treat the contenteditable target inside the iframe as "typing".
+  const iframe = document.getElementById("oeBgFrame");
+  const insideIframe = iframe && iframe.contentDocument &&
+    iframe.contentDocument.activeElement &&
+    iframe.contentDocument.activeElement.isContentEditable;
+  if (insideIframe) return;
+  if (insideOverlay && (active.isContentEditable || active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) {
     return;
   }
   if ((e.key === "Delete" || e.key === "Backspace") && oe.selectedId != null) {
