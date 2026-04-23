@@ -1875,14 +1875,26 @@ function parseText(text, lineColors = {}) {
     m = line.match(/^\[(?:立ち位置|ステージ)\]\s*(.+)$/);
     if (m) {
       startPage();
-      // Match: 1 non-delimiter char as name, optional colon/space, optional signed decimal
-      // Delimiters (excluded from name): whitespace, digits, -, comma/、, :, :, .
-      const re = /([^\s\d\-,、:：.])\s*[:：]?\s*(-?\d+(?:\.\d+)?)?/g;
+      // Match either:
+      //   (a) numeric-ID format "1:-4" — a run of digits + colon + signed decimal
+      //       (lets unnamed members be referenced by ID before a name is set)
+      //   (b) name-initial format "田:-4" or "田-4" — single non-delimiter char +
+      //       optional colon/space + optional signed decimal (existing behavior)
+      // Delimiters (excluded from name-initial group): whitespace, digits, -, comma/、, :, :, .
+      const re = /(?:(\d+)\s*[:：]\s*(-?\d+(?:\.\d+)?))|(?:([^\s\d\-,、:：.])\s*[:：]?\s*(-?\d+(?:\.\d+)?)?)/g;
       const sm = [];
       let mm;
       while ((mm = re.exec(m[1])) !== null) {
-        const ref = mm[1];
-        const pos = mm[2] !== undefined ? parseFloat(mm[2]) : null;
+        let ref, pos;
+        if (mm[1] !== undefined) {
+          // numeric-ID branch
+          ref = mm[1];
+          pos = parseFloat(mm[2]);
+        } else {
+          // name-initial branch
+          ref = mm[3];
+          pos = mm[4] !== undefined ? parseFloat(mm[4]) : null;
+        }
         sm.push({ id: findMemberByRef(ref) || ref, pos });
       }
       const allAuto = sm.every(x => x.pos === null);
@@ -2018,16 +2030,18 @@ function highlightLine(line, lineIdx, lineColors) {
   m = trimmed.match(/^(\[(?:立ち位置|ステージ)\])\s*(.*)$/);
   if (m) {
     const kw = `<span class="tok-kw">${escapeHtml(m[1])}</span> `;
-    // Use same flexible regex: name char + optional colon/space + optional signed number
+    // Same flexible regex as parseText: supports both numeric-ID format ("1:-4") and
+    // name-initial format ("田:-4" or "田-4"). Numeric IDs need the colon for
+    // disambiguation from pure numbers.
     const content = m[2];
-    const re = /([^\s\d\-,、:：.])\s*[:：]?\s*(-?\d+(?:\.\d+)?)?/g;
+    const re = /(?:(\d+)\s*[:：]\s*(-?\d+(?:\.\d+)?))|(?:([^\s\d\-,、:：.])\s*[:：]?\s*(-?\d+(?:\.\d+)?)?)/g;
     let out = ""; let lastEnd = 0; let mm;
     while ((mm = re.exec(content)) !== null) {
       // Render any inter-token whitespace / delimiters as plain stage color
       if (mm.index > lastEnd) {
         out += `<span class="tok-stage">${escapeHtml(content.slice(lastEnd, mm.index))}</span>`;
       }
-      const ref = mm[1];
+      const ref = mm[1] !== undefined ? mm[1] : mm[3];
       const id = findMemberByRef(ref);
       const col = id && state.members[id] ? state.members[id].color : null;
       const refHtml = col
@@ -2704,9 +2718,22 @@ function renderMembersPanel() {
   panel.querySelectorAll(".name-in").forEach(el => {
     el.addEventListener("input", () => {
       const id = el.dataset.mid;
-      state.members[id].name = el.value;
+      const oldName = state.members[id].name || "";
+      const newName = el.value;
+      const oldLabel = oldName.charAt(0) || id;
+      const newLabel = newName.charAt(0) || id;
+
+      state.members[id].name = newName;
+
+      // If the member's short label changed (e.g. "1" → "田"), rewrite any
+      // existing [立ち位置]/[ステージ] references in the current song text so
+      // the user sees the new name in place of the ID they previously dropped.
+      if (oldLabel !== newLabel) {
+        rewriteStageLabelInEditor(oldLabel, newLabel);
+      }
+
       const dot = panel.querySelector('.dot[data-mid="' + id + '"]');
-      if (dot) dot.textContent = (el.value || "").charAt(0) || id;
+      if (dot) dot.textContent = newLabel;
       refresh();
       renderMemberQuickBtns();
     });
@@ -3150,13 +3177,49 @@ function insertFullLineAtCursor(text) {
 // ================================================
 // DRAG + CLICK buttons
 // ================================================
+// Rewrite member labels inside [立ち位置]/[ステージ] lines of the current song
+// text. Called when a member's name changes so existing references (that were
+// dropped in while the member was unnamed — e.g. "1:0") update to the new name
+// automatically (→ "田:0"), with the correct color applied via the normal render.
+function rewriteStageLabelInEditor(oldLabel, newLabel) {
+  if (!oldLabel || !newLabel || oldLabel === newLabel) return;
+  const esc = String(oldLabel).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Match: (delimiter/start) + oldLabel + (optional colon/whitespace + optional signed number) + (delimiter/end)
+  // The trailing lookahead prevents accidentally matching inside a longer token.
+  const refRe = new RegExp(
+    `(^|[\\s,、])${esc}(\\s*[:：]?\\s*-?\\d+(?:\\.\\d+)?)?(?=[\\s,、]|$)`,
+    "g"
+  );
+  const lines = editor.value.split(/\r?\n/);
+  let changed = false;
+  for (let i = 0; i < lines.length; i++) {
+    const kw = lines[i].match(/^(\s*\[(?:立ち位置|ステージ)\]\s*)(.*)$/);
+    if (!kw) continue;
+    const prefix = kw[1];
+    const content = kw[2];
+    const next = content.replace(refRe, (_, delim, tail) => `${delim}${newLabel}${tail || ""}`);
+    if (next !== content) {
+      lines[i] = prefix + next;
+      changed = true;
+    }
+  }
+  if (!changed) return;
+  const ss = editor.selectionStart, se = editor.selectionEnd;
+  editor.value = lines.join("\n");
+  try { editor.setSelectionRange(ss, se); } catch (_) {}
+  const song = getCurrentSong();
+  if (song) song.text = editor.value;
+}
+
 function getStageTemplate() {
-  // Build default [立ち位置] line using current members (space-separated, no colons)
+  // Build default [立ち位置] line using current members (colon-separated).
+  // Colon separator lets numeric-ID references (e.g. "1:0") parse unambiguously
+  // when members don't have names yet.
   const ids = Object.keys(state.members).slice(0, 5);
   const positions = [-4, -2, 0, 2, 4];
   const parts = ids.map((id, i) => {
     const initial = (state.members[id].name || "").charAt(0) || id;
-    return `${initial}${positions[i] ?? 0}`;  // e.g. "田-50"
+    return `${initial}:${positions[i] ?? 0}`;
   });
   return `[立ち位置] ${parts.join(" ")}`;
 }
@@ -3392,7 +3455,10 @@ editor.addEventListener("drop", (e) => {
     const labels = labelsStr.split(",").filter(Boolean);
     const lineTxt = lines[targetLine] || "";
     const isStageLine = /^\s*\[(?:立ち位置|ステージ)\]/.test(lineTxt);
-    const appendItems = labels.map(l => `${l}0`).join(" ");
+    // Use explicit "label:0" format so the reference is unambiguous even when the
+    // label is a numeric member ID (e.g. "1:0") — plain "10" would otherwise be
+    // parsed as the number 10 rather than member-1 at position 0.
+    const appendItems = labels.map(l => `${l}:0`).join(" ");
     if (isStageLine) {
       // Insert at exact caret position within the stage line (not just append)
       let lineStart = 0;
