@@ -2,7 +2,20 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>PROMPTER STUDIO</title>
+
+<!-- PWA: lets Chrome/Safari install the app to the dock/home screen with the
+     P logo as its icon. theme-color tints the address bar / title bar. -->
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#d4a27a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PROMPTER">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&display=swap" rel="stylesheet">
@@ -5809,6 +5822,14 @@ renderMemberQuickBtns();
 renderSongList();
 loadCurrentSong();
 renderSetlistDropdown();
+
+// PWA: register the service worker so Chrome surfaces the "Install app"
+// prompt and the app continues to work if the network drops mid-show.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  });
+}
 </script>
 
 </body>

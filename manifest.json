@@ -1,0 +1,31 @@
+{
+  "name": "PROMPTER STUDIO",
+  "short_name": "PROMPTER",
+  "description": "Concert cueing prompter for stage directors.",
+  "start_url": "/prompter-studio/",
+  "scope": "/prompter-studio/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#262624",
+  "theme_color": "#d4a27a",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
