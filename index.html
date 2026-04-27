@@ -196,6 +196,14 @@
     letter-spacing: 0.18em; text-transform: uppercase; font-weight: 600;
   }
   .setlist-hero-meta .dot { width: 4px; height: 4px; border-radius: 50%; background: var(--accent); }
+  .setlist-import-btn {
+    background: transparent; color: var(--text-2);
+    border: 1px solid var(--border); padding: 6px 12px;
+    border-radius: 6px; font: inherit; font-size: 11px;
+    letter-spacing: 0.18em; text-transform: uppercase; font-weight: 600;
+    cursor: pointer; transition: 0.15s;
+  }
+  .setlist-import-btn:hover { color: var(--accent); border-color: var(--accent); }
 
   /* Card grid */
   .setlist-page-grid {
@@ -418,6 +426,27 @@
   }
   .setlist-dropdown-footer button:hover { border-color: var(--accent); color: var(--accent); }
   .spacer { flex: 1; }
+  /* Save state indicator: a small dot + label that goes amber while a save
+     is queued and green right after the latest edit lands in localStorage,
+     so the director never has to wonder whether they've saved their work. */
+  .save-indicator {
+    display: flex; align-items: center; gap: 6px;
+    margin-right: 12px;
+    font-size: 11px; color: var(--text-3);
+    letter-spacing: 0.06em;
+  }
+  .save-indicator .save-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #5fa977; transition: background 0.2s, box-shadow 0.2s;
+  }
+  .save-indicator.saving .save-dot {
+    background: #d4a27a; box-shadow: 0 0 8px rgba(212,162,122,0.6);
+    animation: save-pulse 1.2s ease-in-out infinite;
+  }
+  .save-indicator.error .save-dot { background: #c34a36; box-shadow: 0 0 8px rgba(195,74,54,0.7); }
+  .save-indicator.saving { color: var(--text-2); }
+  .save-indicator.error { color: #f7b8a8; }
+  @keyframes save-pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.55 } }
   .user-pill {
     display: flex; align-items: center; gap: 8px;
     padding: 0 8px 0 0; font-size: 12px; color: var(--text-2);
@@ -432,6 +461,11 @@
     background: var(--accent); border-color: var(--accent); color: #0a0a0e; font-weight: 700;
   }
   .pill.primary:hover { background: var(--accent-2); border-color: var(--accent-2); }
+  .pill.blocked {
+    border-color: #c34a36; color: #f7b8a8;
+    box-shadow: 0 0 0 1px rgba(195,74,54,0.3);
+  }
+  .pill.blocked::before { content: "⚠ "; }
 
   /* ================================================
      MAIN 3-COLUMN LAYOUT
@@ -1430,10 +1464,13 @@
       <span><span id="setlistHeroCount">—</span> Total</span>
       <span class="dot"></span>
       <span>Select to open</span>
+      <span class="dot"></span>
+      <button id="importSetlistBtn" class="setlist-import-btn" title="ファイルから読み込み">⬆ インポート</button>
     </div>
   </div>
   <div class="setlist-page-grid" id="setlistPageGrid"></div>
 </div>
+<input type="file" id="importSetlistFileInput" accept=".prompter,application/json" style="display:none">
 
 <!-- ============ MAIN APP ============ -->
 <div class="editor-view hidden" id="editorView">
@@ -1459,6 +1496,10 @@
     </div>
   </div>
   <div class="spacer"></div>
+  <div class="save-indicator" id="saveIndicator" title="保存状態">
+    <span class="save-dot"></span>
+    <span class="save-label">保存済み</span>
+  </div>
   <div class="user-pill">
     <div class="avatar">U</div>
     <span>User</span>
@@ -2554,6 +2595,8 @@ function renderSongList() {
       if (state.songs.length <= 1) { alert("最後の1曲は削除できません"); return; }
       if (!confirm("この曲を削除しますか?")) return;
       const i = state.songs.findIndex(x => x.id === sid);
+      const songName = state.songs[i]?.title || "曲";
+      pushUndoSnapshot(`「${songName}」を削除`);
       state.songs.splice(i, 1);
       if (state.currentSongId === sid) {
         state.currentSongId = state.songs[Math.max(0, i-1)].id;
@@ -2796,6 +2839,10 @@ function renderMembersPanel() {
       const m = state.members[id];
       if (!confirm(`メンバー「${m.name || id}」を削除しますか?`)) return;
       const oldLabel = (m.name || "").charAt(0) || id;
+      // Persist the new live state into setlistsData first so the undo
+      // snapshot captures the most recent edits, then snapshot.
+      persistCurrent();
+      pushUndoSnapshot(`メンバー「${m.name || id}」を削除`);
       delete state.members[id];
       // Clean up references to the deleted member across ALL songs in the setlist:
       //  - song.lineColors entries pointing at this id (or containing it in a
@@ -4143,7 +4190,33 @@ document.addEventListener("keydown", (e) => {
 
 // ========== 外部ディスプレイ表示 ==========
 let externalWin = null;
+
+function markExternalBtnBlocked() {
+  const btn = document.getElementById("externalBtn");
+  if (!btn) return;
+  btn.classList.add("blocked");
+  btn.title = "ポップアップがブロックされています — Chromeのポップアップ許可設定を確認";
+}
+function unmarkExternalBtnBlocked() {
+  const btn = document.getElementById("externalBtn");
+  if (!btn) return;
+  btn.classList.remove("blocked");
+  btn.title = "別ウィンドウで開く → 外部モニターへドラッグ → ダブルクリックで全画面";
+}
+
 const mainChannel = (function(){ try { return new BroadcastChannel("prompter-sync"); } catch(e) { return null; } })();
+// If BroadcastChannel isn't supported (Safari Private mode, some Brave
+// configs, very old browsers), the editor and the popped-out prompter
+// can't sync page navigation. Tell the director once at the top of the
+// screen so they know to navigate manually if they use the popup.
+if (!mainChannel) {
+  setTimeout(() => {
+    showStorageWarning(
+      "このブラウザでは外部ディスプレイとの自動同期が使えないようです" +
+      "（プライベートウィンドウ等）。外部ウィンドウのページ送りは手動で操作してください。"
+    );
+  }, 800);
+}
 if (mainChannel) {
   mainChannel.onmessage = (ev) => {
     if (ev.data?.type === "slide-changed") {
@@ -4177,9 +4250,18 @@ function openExternalPrompter() {
   externalWin = window.open("", "prompter-external",
     "width=1280,height=720,menubar=no,toolbar=no,location=no,status=no,resizable=yes");
   if (!externalWin) {
-    alert("ポップアップがブロックされました。ブラウザの設定で許可してください。");
+    // window.open returned null = popup was blocked. Mark the button so the
+    // director sees a persistent warning and one click of help instead of a
+    // single dismiss-able alert that can be missed in stage prep.
+    markExternalBtnBlocked();
+    alert(
+      "ポップアップがブロックされました。\n\n" +
+      "Chrome のアドレスバー右端に出た「ポップアップがブロックされました」を" +
+      "クリック → 「常に許可」にチェック → もう一度ボタンを押してください。"
+    );
     return;
   }
+  unmarkExternalBtnBlocked();
   externalWin.document.open();
   externalWin.document.write(html);
   externalWin.document.close();
@@ -4318,6 +4400,73 @@ function snapshotCurrentState() {
   };
 }
 
+// Undo stack for destructive actions only. Native textarea Cmd+Z handles
+// per-character editing inside the lyrics box; this stack covers the
+// app-level operations that the textarea's undo can't see — song delete,
+// member delete, member rename, big drag inserts, paste-replace, etc.
+// We snapshot the entire setlistsData (small JSON) right BEFORE the
+// destructive action runs, then Cmd+Shift+Z (or Ctrl+Shift+Z) pops the
+// snapshot and re-loads it. Capped to avoid unbounded memory growth.
+const UNDO_STACK = [];
+const UNDO_LIMIT = 25;
+
+function pushUndoSnapshot(label) {
+  try {
+    UNDO_STACK.push({
+      label: label || "操作",
+      data: JSON.parse(JSON.stringify(setlistsData)),
+      currentSongId: state.currentSongId,
+      currentPageIdx: state.currentPageIdx,
+    });
+    if (UNDO_STACK.length > UNDO_LIMIT) UNDO_STACK.shift();
+  } catch (_) {}
+}
+
+function performUndo() {
+  const snap = UNDO_STACK.pop();
+  if (!snap) return false;
+  setlistsData = snap.data;
+  const sl = setlistsData.setlists.find(s => s.id === setlistsData.currentSetlistId)
+            || setlistsData.setlists[0];
+  if (!sl) return false;
+  setlistsData.currentSetlistId = sl.id;
+  applySetlistToState(sl);
+  if (snap.currentSongId && state.songs.some(s => s.id === snap.currentSongId)) {
+    state.currentSongId = snap.currentSongId;
+  }
+  state.currentPageIdx = Math.max(0, snap.currentPageIdx | 0);
+  renderMembersPanel();
+  renderMemberQuickBtns();
+  renderSongList();
+  loadCurrentSong();
+  renderSetlistDropdown();
+  saveSetlistsNow();
+  showUndoToast(`元に戻しました: ${snap.label}`);
+  return true;
+}
+
+function showUndoToast(message) {
+  let t = document.getElementById("undoToast");
+  if (!t) {
+    t = document.createElement("div");
+    t.id = "undoToast";
+    t.style.cssText =
+      "position:fixed;bottom:24px;left:50%;transform:translateX(-50%);" +
+      "background:#262624;color:#ece6d8;padding:10px 18px;border-radius:8px;" +
+      "border:1px solid #46463f;box-shadow:0 8px 24px rgba(0,0,0,.4);" +
+      "font:600 13px/1.4 'Helvetica Neue','Hiragino Sans',sans-serif;" +
+      "z-index:99998;opacity:0;transition:opacity .2s,transform .2s;pointer-events:none";
+    document.body.appendChild(t);
+  }
+  t.textContent = message;
+  requestAnimationFrame(() => {
+    t.style.opacity = "1";
+    t.style.transform = "translateX(-50%) translateY(0)";
+  });
+  clearTimeout(showUndoToast._t);
+  showUndoToast._t = setTimeout(() => { t.style.opacity = "0"; }, 1800);
+}
+
 // Persistent on-screen banner (top of viewport) for storage problems the user
 // MUST notice — localStorage is the only source of truth, so a silent save
 // failure during a show would lose all subsequent edits.
@@ -4340,8 +4489,18 @@ function showStorageWarning(message) {
   bar.firstChild.textContent = "⚠ " + message;
 }
 
+function setSaveIndicator(state, label) {
+  const el = document.getElementById("saveIndicator");
+  if (!el) return;
+  el.classList.remove("saving", "error");
+  if (state) el.classList.add(state);
+  const lab = el.querySelector(".save-label");
+  if (lab && label) lab.textContent = label;
+}
+
 function saveSetlistsDebounced() {
   clearTimeout(saveSetlistsDebounced._t);
+  setSaveIndicator("saving", "保存中…");
   saveSetlistsDebounced._t = setTimeout(() => saveSetlistsNow(), 400);
 }
 
@@ -4353,8 +4512,10 @@ function saveSetlistsNow() {
   try {
     localStorage.setItem(SETLIST_STORAGE_KEY, JSON.stringify(setlistsData));
     saveSetlistsNow._lastError = null;
+    setSaveIndicator("", "保存済み");
   } catch (e) {
     saveSetlistsNow._lastError = e;
+    setSaveIndicator("error", "保存エラー");
     // Quota exceeded is the realistic failure mode for a stage-director
     // accumulating overlays/songs over many shows. Tell them loudly so they
     // can export & clear before more edits silently fall on the floor.
@@ -4456,6 +4617,7 @@ function renderSetlistPickerPage() {
       <div class="setlist-card-footer">
         <span>Updated · ${edited}</span>
         <div class="setlist-card-actions">
+          <button data-action="export" title="ファイルとして書き出し (.prompter)">⬇</button>
           <button data-action="rename" title="Rename">✎</button>
           <button data-action="duplicate" title="Duplicate">⎘</button>
           <button class="del-btn" data-action="delete" title="Delete">🗑</button>
@@ -4478,6 +4640,7 @@ function renderSetlistPickerPage() {
         if (action === "rename") renameSetlist(sid);
         else if (action === "duplicate") duplicateSetlist(sid);
         else if (action === "delete") deleteSetlist(sid);
+        else if (action === "export") exportSetlistToFile(sid);
         renderSetlistPickerPage();
         return;
       }
@@ -4487,6 +4650,119 @@ function renderSetlistPickerPage() {
   grid.querySelector("#createSetlistCard").addEventListener("click", () => {
     createNewSetlistFromPicker();
   });
+}
+
+// ===== EXPORT / IMPORT (.prompter file) =====
+// Minimal JSON snapshot of one setlist. Mirrors the .telop pattern from
+// TELOP STUDIO: just the data the user authored, no app-internal cruft.
+const PROMPTER_FILE_FORMAT = "prompter-studio";
+const PROMPTER_FILE_VERSION = 1;
+
+function buildSetlistExport(sl) {
+  return {
+    format: PROMPTER_FILE_FORMAT,
+    version: PROMPTER_FILE_VERSION,
+    exportedAt: new Date().toISOString(),
+    name: sl.name || "Untitled",
+    members: sl.members || {},
+    groups: sl.groups || [],
+    songs: (sl.songs || []).map(s => ({
+      id: s.id,
+      title: s.title,
+      key: s.key || "",
+      type: s.type || "song",
+      text: s.text || "",
+      lineColors: s.lineColors || {},
+      pageOverrides: s.pageOverrides || undefined,
+      overlays: s.overlays || undefined,
+      countdownSec: s.countdownSec ?? null,
+      nextSongLabel: s.nextSongLabel || "",
+    })),
+    currentSongId: sl.currentSongId || null,
+  };
+}
+
+function exportSetlistToFile(sid) {
+  const sl = setlistsData.setlists.find(s => s.id === sid);
+  if (!sl) return;
+  // Make sure the on-disk snapshot reflects the live editor state if this
+  // is the currently-loaded setlist
+  if (setlistsData.currentSetlistId === sid) persistCurrent();
+  const data = buildSetlistExport(sl);
+  const json = JSON.stringify(data, null, 2);
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const safeName = (sl.name || "setlist").replace(/[\/\\:*?"<>|]+/g, "_").trim() || "setlist";
+  a.href = url;
+  a.download = safeName + ".prompter";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function importSetlistFromObject(obj) {
+  if (!obj || obj.format !== PROMPTER_FILE_FORMAT) {
+    alert("ファイル形式が違います（.prompter ファイルではないようです）。");
+    return false;
+  }
+  if (!Array.isArray(obj.songs)) {
+    alert("セットリストデータが壊れているようです。");
+    return false;
+  }
+  // Build a fresh setlist from the imported data, with a new id so it
+  // never clobbers the current one. Names are preserved; user can rename
+  // later from the picker.
+  const newId = genSetlistId();
+  const sl = {
+    id: newId,
+    name: (obj.name || "Imported") + (obj.name && setlistsData.setlists.some(s => s.name === obj.name) ? " (imported)" : ""),
+    members: obj.members && typeof obj.members === "object" ? JSON.parse(JSON.stringify(obj.members)) : initMembers(),
+    groups: Array.isArray(obj.groups) ? JSON.parse(JSON.stringify(obj.groups)) : [],
+    songs: obj.songs.map(s => ({
+      id: s.id || ("song-" + Math.random().toString(36).slice(2, 8)),
+      title: s.title || "Untitled",
+      key: s.key || "",
+      type: s.type === "mc" ? "mc" : "song",
+      text: typeof s.text === "string" ? s.text : "",
+      lineColors: (s.lineColors && typeof s.lineColors === "object") ? s.lineColors : {},
+      pageOverrides: (s.pageOverrides && typeof s.pageOverrides === "object") ? s.pageOverrides : undefined,
+      overlays: (s.overlays && typeof s.overlays === "object") ? s.overlays : undefined,
+      countdownSec: s.countdownSec ?? null,
+      nextSongLabel: s.nextSongLabel || "",
+    })),
+    currentSongId: obj.currentSongId || null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  if (!sl.songs.length) {
+    alert("インポートできる曲がありませんでした。");
+    return false;
+  }
+  if (!sl.songs.some(s => s.id === sl.currentSongId)) sl.currentSongId = sl.songs[0].id;
+  setlistsData.setlists.push(sl);
+  saveSetlistsNow();
+  return sl.id;
+}
+
+function importSetlistFromFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    try {
+      const obj = JSON.parse(ev.target.result);
+      const newId = importSetlistFromObject(obj);
+      if (newId) {
+        renderSetlistPickerPage();
+        // Don't auto-open — let the director see the new card on the picker.
+      }
+    } catch (e) {
+      alert("ファイルを読み込めませんでした: " + (e.message || e));
+    }
+  };
+  reader.onerror = () => alert("ファイル読み込みエラー");
+  reader.readAsText(file);
 }
 
 function openSetlistFromPicker(sid) {
@@ -4664,7 +4940,10 @@ function deleteSetlist(sid) {
   }
   const sl = setlistsData.setlists.find(s => s.id === sid);
   if (!sl) return;
-  if (!confirm(`「${sl.name || "(無題)"}」を削除しますか？\nこの操作は取り消せません。`)) return;
+  if (!confirm(`「${sl.name || "(無題)"}」を削除しますか？\n\nCmd+Shift+Z（または Ctrl+Shift+Z）で元に戻せます。`)) return;
+  // Persist live state first so the snapshot captures the most recent edits
+  persistCurrent();
+  pushUndoSnapshot(`セットリスト「${sl.name || "(無題)"}」を削除`);
   const idx = setlistsData.setlists.findIndex(s => s.id === sid);
   setlistsData.setlists.splice(idx, 1);
   if (setlistsData.currentSetlistId === sid) {
@@ -5907,6 +6186,19 @@ renderSongList();
 loadCurrentSong();
 renderSetlistDropdown();
 
+// Import button on the setlist picker page
+(function wireImportButton() {
+  const btn = document.getElementById("importSetlistBtn");
+  const fileInput = document.getElementById("importSetlistFileInput");
+  if (!btn || !fileInput) return;
+  btn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (f) importSetlistFromFile(f);
+    fileInput.value = ""; // reset so the same file can be picked again
+  });
+})();
+
 // PWA: register the service worker so Chrome surfaces the "Install app"
 // prompt and the app continues to work if the network drops mid-show.
 if ("serviceWorker" in navigator) {
@@ -5914,6 +6206,19 @@ if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("sw.js").catch(() => {});
   });
 }
+
+// Cmd+Shift+Z (Mac) / Ctrl+Shift+Z (Win) → undo destructive app action.
+// Cmd+Z is intentionally NOT used because the lyrics textarea has its own
+// native undo for per-character editing; we'd otherwise hijack it.
+document.addEventListener("keydown", (e) => {
+  // Don't fire while a modal-ish input is up
+  if (document.getElementById("overlayEditor")?.classList.contains("open")) return;
+  const isUndoCombo = (e.key === "Z" || e.key === "z") && e.shiftKey && (e.metaKey || e.ctrlKey);
+  if (!isUndoCombo) return;
+  if (UNDO_STACK.length === 0) return;
+  e.preventDefault();
+  performUndo();
+});
 
 // Flush any debounced save when the tab is being hidden / closed. Without
 // this, a 400ms-debounced save could be in flight when a stage director
