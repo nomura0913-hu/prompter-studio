@@ -2599,6 +2599,11 @@ function loadCurrentSong() {
   songTitleIn.value = song.title;
   keyInput.value = song.key || "";
   updateInfoBarForType(song);
+  // Reset the auto-scroll memo: state.currentPageIdx resets to 0 for the new
+  // song, but the module-scoped _lastAutoScrolledPageIdx still holds the
+  // previous song's index — and if that happens to equal 0 we'd skip the
+  // initial scroll-into-view. Force a scroll on the first render.
+  _lastAutoScrolledPageIdx = -1;
   refresh();
 }
 function getAutoNextSongName() {
@@ -3057,6 +3062,13 @@ function refresh() {
   // If the current base differs from the saved base (user edited main textarea),
   // drop the override so left-text changes propagate.
   if (song && song.pageOverrides) {
+    // NOTE on mutation order: parseText() ABOVE has already finished and
+    // returned a fresh `pages` array (with srcLineIdx tags on every block).
+    // The mutations below modify song.pageOverrides, song.lineColors, and
+    // each page's blocks — but parseText() no longer runs again in this
+    // refresh() pass, so there's no stale-read risk. The next refresh()
+    // call will re-read everything from scratch.
+    //
     // Re-key drifted overrides so they follow their content when page
     // boundaries shift (e.g. user inserts/removes blank lines and the
     // override's page index changes). Entries whose base text no longer
@@ -3364,8 +3376,14 @@ function purgeMemberFromAllSongs(memberId, oldLabel) {
         "$1"
       );
     }
-    // Collapse any stray double delimiters / leading/trailing separators
-    return out.replace(/[,、]\s*(?=[,、])/g, "").replace(/^[,\s、]+|[,\s、]+$/g, "").replace(/\s{2,}/g, " ");
+    // Collapse any stray double delimiters / leading-or-trailing separators.
+    // Note: preserves doubled spaces the user typed for readability between
+    // members; only collapses runs of 3+ spaces (which can only come from
+    // the deletion above stitching neighbouring spaces together).
+    return out
+      .replace(/[,、]\s*(?=[,、])/g, "")
+      .replace(/^[,\s、]+|[,\s、]+$/g, "")
+      .replace(/\s{3,}/g, "  ");
   }
 
   function cleanTextForStageLines(text) {
@@ -4141,6 +4159,11 @@ if (mainChannel) {
 function openExternalPrompter() {
   const song = getCurrentSong();
   if (!song) return;
+  // Flush any debounced save before we hand a snapshot to the external
+  // window — otherwise a rapid edit-then-open sequence could ship stale
+  // content to the prompter window for the next 400ms.
+  persistCurrent();
+  saveSetlistsNow();
   const html = buildPrompterHTML(pages, state.members, song.title, state.concertTitle, state.songs, state.songs.findIndex(s=>s.id===song.id), { countdownSec: song.type === "mc" ? song.countdownSec : null, isMC: song.type === "mc", nextSongName: state.songs[state.songs.findIndex(s=>s.id===song.id)+1]?.title || "" });
   // Open as a new standalone window that can be dragged to sub-display
   if (externalWin && !externalWin.closed) {
@@ -4278,7 +4301,9 @@ document.addEventListener("keydown", (e) => {
 // MULTIPLE SETLISTS (localStorage persistence + UI)
 // ================================================
 const SETLIST_STORAGE_KEY = 'prompterStudio_data_v6';
-let setlistsData = { setlists: [], currentSetlistId: null };
+const SETLIST_STORAGE_KEY_PREVIOUS = ['prompterStudio_data_v5', 'prompterStudio_data_v4'];
+const STORAGE_SCHEMA_VERSION = 6;
+let setlistsData = { version: STORAGE_SCHEMA_VERSION, setlists: [], currentSetlistId: null };
 
 function genSetlistId() { return 'sl_' + Date.now() + '_' + Math.random().toString(36).slice(2,6); }
 
@@ -4293,11 +4318,55 @@ function snapshotCurrentState() {
   };
 }
 
+// Persistent on-screen banner (top of viewport) for storage problems the user
+// MUST notice — localStorage is the only source of truth, so a silent save
+// failure during a show would lose all subsequent edits.
+function showStorageWarning(message) {
+  let bar = document.getElementById("storageWarningBar");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = "storageWarningBar";
+    bar.style.cssText =
+      "position:fixed;top:0;left:0;right:0;z-index:99999;" +
+      "background:#b8392a;color:#fff;padding:10px 16px;" +
+      "font:600 13px/1.4 'Helvetica Neue','Hiragino Sans',sans-serif;" +
+      "box-shadow:0 2px 12px rgba(0,0,0,.4);display:flex;gap:12px;align-items:center";
+    bar.innerHTML =
+      '<span style="flex:1"></span>' +
+      '<button style="background:rgba(0,0,0,.25);color:#fff;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font:inherit">閉じる</button>';
+    bar.querySelector("button").addEventListener("click", () => bar.remove());
+    document.body.appendChild(bar);
+  }
+  bar.firstChild.textContent = "⚠ " + message;
+}
+
 function saveSetlistsDebounced() {
   clearTimeout(saveSetlistsDebounced._t);
-  saveSetlistsDebounced._t = setTimeout(() => {
-    try { localStorage.setItem(SETLIST_STORAGE_KEY, JSON.stringify(setlistsData)); } catch(e){}
-  }, 400);
+  saveSetlistsDebounced._t = setTimeout(() => saveSetlistsNow(), 400);
+}
+
+// Synchronous save — used right before potentially-disruptive actions
+// (opening external window, navigating away) so a queued debounced save
+// can't silently lose the most recent edits.
+function saveSetlistsNow() {
+  clearTimeout(saveSetlistsDebounced._t);
+  try {
+    localStorage.setItem(SETLIST_STORAGE_KEY, JSON.stringify(setlistsData));
+    saveSetlistsNow._lastError = null;
+  } catch (e) {
+    saveSetlistsNow._lastError = e;
+    // Quota exceeded is the realistic failure mode for a stage-director
+    // accumulating overlays/songs over many shows. Tell them loudly so they
+    // can export & clear before more edits silently fall on the floor.
+    if (e && (e.name === "QuotaExceededError" || /quota/i.test(e.message || ""))) {
+      showStorageWarning(
+        "ローカル保存の容量オーバーで、これ以上の自動保存ができません。" +
+        "古いセットリストを削除するか、書き出して整理してください（編集は失われます）。"
+      );
+    } else {
+      showStorageWarning("ローカル保存に失敗しました（" + (e?.message || e) + "）。");
+    }
+  }
 }
 
 function persistCurrent() {
@@ -4311,10 +4380,25 @@ function persistCurrent() {
 
 function loadSetlistsFromStorage() {
   try {
-    const raw = localStorage.getItem(SETLIST_STORAGE_KEY);
+    let raw = localStorage.getItem(SETLIST_STORAGE_KEY);
+    let migratedFrom = null;
+    // If the current-version key is empty, look back at older keys so users
+    // upgrading from a previous version don't lose their setlists.
+    if (!raw) {
+      for (const oldKey of SETLIST_STORAGE_KEY_PREVIOUS) {
+        const old = localStorage.getItem(oldKey);
+        if (old) { raw = old; migratedFrom = oldKey; break; }
+      }
+    }
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed.setlists || !parsed.setlists.length) return null;
+    parsed.version = STORAGE_SCHEMA_VERSION;
+    if (migratedFrom) {
+      // Save under the new key so older keys can eventually be cleaned up.
+      // Old key intentionally NOT removed yet — keep as a safety net for now.
+      try { localStorage.setItem(SETLIST_STORAGE_KEY, JSON.stringify(parsed)); } catch(_) {}
+    }
     return parsed;
   } catch(e) { return null; }
 }
@@ -5830,6 +5914,18 @@ if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("sw.js").catch(() => {});
   });
 }
+
+// Flush any debounced save when the tab is being hidden / closed. Without
+// this, a 400ms-debounced save could be in flight when a stage director
+// closes the tab mid-show; their last edits would never reach localStorage.
+// pagehide fires reliably on tab close, navigation, and mobile background.
+window.addEventListener("pagehide", () => { saveSetlistsNow(); });
+// visibilitychange catches the "switched to another tab" case earlier so
+// the most recent edits land in storage even if the browser later kills
+// the tab without a pagehide.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") saveSetlistsNow();
+});
 </script>
 
 </body>
