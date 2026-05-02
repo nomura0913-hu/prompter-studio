@@ -2592,7 +2592,7 @@ function renderSongList() {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       const sid = btn.dataset.sid;
-      if (state.songs.length <= 1) { alert("最後の1曲は削除できません"); return; }
+      if (state.songs.length <= 1) { showToast("最後の1曲は削除できません", "warn"); return; }
       if (!confirm("この曲を削除しますか?")) return;
       const i = state.songs.findIndex(x => x.id === sid);
       const songName = state.songs[i]?.title || "曲";
@@ -2833,7 +2833,7 @@ function renderMembersPanel() {
     el.addEventListener("click", () => {
       const id = el.dataset.mid;
       if (Object.keys(state.members).length <= 1) {
-        alert("最後のメンバーは削除できません。");
+        showToast("最後のメンバーは削除できません", "warn");
         return;
       }
       const m = state.members[id];
@@ -3108,6 +3108,12 @@ function refresh() {
   // Format: song.pageOverrides[idx] = { base: "...original text at time of override...", text: "...edited text..." }
   // If the current base differs from the saved base (user edited main textarea),
   // drop the override so left-text changes propagate.
+  // We collect "lost during re-key" counts here so we can warn the user
+  // ONCE — they need to know that some hand-edited overlay/override data
+  // didn't survive a big text edit, but we don't want to spam them on
+  // every keystroke.
+  const driftStats = { dropped: 0 };
+
   if (song && song.pageOverrides) {
     // NOTE on mutation order: parseText() ABOVE has already finished and
     // returned a fresh `pages` array (with srcLineIdx tags on every block).
@@ -3119,8 +3125,8 @@ function refresh() {
     // Re-key drifted overrides so they follow their content when page
     // boundaries shift (e.g. user inserts/removes blank lines and the
     // override's page index changes). Entries whose base text no longer
-    // matches ANY current page are dropped.
-    song.pageOverrides = remapPageKeyedByBase(song.pageOverrides, pages, ov => ov && ov.base);
+    // matches ANY current page are dropped — counted into driftStats.
+    song.pageOverrides = remapPageKeyedByBase(song.pageOverrides, pages, ov => ov && ov.base, driftStats);
     if (Object.keys(song.pageOverrides).length === 0) delete song.pageOverrides;
 
     // Apply overrides to pages. Legacy entries (string, or without .base) were
@@ -3177,7 +3183,8 @@ function refresh() {
     song.overlays = remapPageKeyedByBase(
       song.overlays,
       pages,
-      ov => (ov && !Array.isArray(ov) && typeof ov.base === "string") ? ov.base : null
+      ov => (ov && !Array.isArray(ov) && typeof ov.base === "string") ? ov.base : null,
+      driftStats
     );
     if (Object.keys(song.overlays).length === 0) delete song.overlays;
     pages.forEach((p, i) => {
@@ -3187,6 +3194,22 @@ function refresh() {
       if (els && els.length) p.overlay = els;
     });
   }
+
+  // If some override / overlay entries had stored bases that no longer
+  // match any current page (i.e. the user's text edit removed/replaced the
+  // page that hosted them), let the director know so they can decide
+  // whether to undo the edit. Suppressed after the first trigger per
+  // session — it only fires when something *actually* gets lost.
+  if (driftStats.dropped > 0 && !refresh._driftWarned) {
+    refresh._driftWarned = true;
+    showToast(
+      "ページ編集（オーバーレイ）" + driftStats.dropped + "件が、本文の変更で対応するページが見つからなくなり破棄されました。" +
+      "戻したい場合は ⌘+Shift+Z を試してください。",
+      "warn",
+      6000
+    );
+  }
+
   renderPreviewPane(pages);
   renderLineNumbers();
   renderHighlight();
@@ -3331,7 +3354,13 @@ function insertFullLineAtCursor(text) {
 // entry at save time, or null/undefined if the entry has no base (legacy
 // format). Legacy entries are kept at their original index if that index
 // still points to a valid page; otherwise they're dropped.
-function remapPageKeyedByBase(map, pages, getBase) {
+// `outStats` (optional) is an object the function will MUTATE with:
+//   { dropped: <number of entries that had a stored base but couldn't
+//     be matched to any current page (truly lost), excluding legacy
+//     entries with no base which are silently kept-or-dropped> }
+// Used so refresh() can show a one-time toast when overlay/override drift
+// actually causes data loss.
+function remapPageKeyedByBase(map, pages, getBase, outStats) {
   const result = {};
   const unclaimed = { ...map };
 
@@ -3363,17 +3392,22 @@ function remapPageKeyedByBase(map, pages, getBase) {
 
   // Pass 3: legacy entries (no base) — preserve at their original index if
   // that still points to a valid page; otherwise drop.
+  let droppedWithBase = 0;
   for (const k of Object.keys(unclaimed)) {
     const idx = parseInt(k);
-    if (!isFinite(idx)) continue;
     const ov = unclaimed[k];
     const base = getBase(ov);
-    if (base != null) continue; // had a base but didn't match anywhere — drop
+    if (base != null) {
+      droppedWithBase++;
+      continue; // had a base but didn't match anywhere — drop
+    }
+    if (!isFinite(idx)) continue;
     if (pages[idx] && pages[idx].type === "page") {
       result[idx] = ov;
     }
   }
 
+  if (outStats) outStats.dropped = (outStats.dropped || 0) + droppedWithBase;
   return result;
 }
 
@@ -4205,18 +4239,11 @@ function unmarkExternalBtnBlocked() {
 }
 
 const mainChannel = (function(){ try { return new BroadcastChannel("prompter-sync"); } catch(e) { return null; } })();
-// If BroadcastChannel isn't supported (Safari Private mode, some Brave
-// configs, very old browsers), the editor and the popped-out prompter
-// can't sync page navigation. Tell the director once at the top of the
-// screen so they know to navigate manually if they use the popup.
-if (!mainChannel) {
-  setTimeout(() => {
-    showStorageWarning(
-      "このブラウザでは外部ディスプレイとの自動同期が使えないようです" +
-      "（プライベートウィンドウ等）。外部ウィンドウのページ送りは手動で操作してください。"
-    );
-  }, 800);
-}
+// NOTE: We do NOT show a warning at startup if BroadcastChannel is unsupported.
+// Many users never open the external prompter window, and a startup banner
+// for a feature they don't use is just noise. The warning is shown lazily
+// from openExternalPrompter() — the moment the feature is actually needed.
+let _bcWarnedThisSession = false;
 if (mainChannel) {
   mainChannel.onmessage = (ev) => {
     if (ev.data?.type === "slide-changed") {
@@ -4232,6 +4259,19 @@ if (mainChannel) {
 function openExternalPrompter() {
   const song = getCurrentSong();
   if (!song) return;
+  // Lazy BroadcastChannel warning: the second window can be opened, but
+  // page navigation won't auto-sync between editor and prompter. Tell the
+  // director once per session, the first time they actually open the
+  // external display.
+  if (!mainChannel && !_bcWarnedThisSession) {
+    _bcWarnedThisSession = true;
+    showToast(
+      "このブラウザでは外部ディスプレイとの自動ページ同期が使えません" +
+      "（プライベートウィンドウ等）。外部ウィンドウ側はキーボードで操作してください。",
+      "warn",
+      6000
+    );
+  }
   // Flush any debounced save before we hand a snapshot to the external
   // window — otherwise a rapid edit-then-open sequence could ship stale
   // content to the prompter window for the next 400ms.
@@ -4256,10 +4296,14 @@ function openExternalPrompter() {
     // director sees a persistent warning and one click of help instead of a
     // single dismiss-able alert that can be missed in stage prep.
     markExternalBtnBlocked();
-    alert(
-      "ポップアップがブロックされました。\n\n" +
-      "Chrome のアドレスバー右端に出た「ポップアップがブロックされました」を" +
-      "クリック → 「常に許可」にチェック → もう一度ボタンを押してください。"
+    // Use a longer-lived toast (8 sec) for this one — it's a guidance message
+    // the user might need a moment to read while figuring out where the
+    // browser's blocked-popup hint is.
+    showToast(
+      "ポップアップがブロックされました。Chrome アドレスバー右端の「ポップアップがブロックされました」を" +
+      "クリックして「常に許可」にチェック → もう一度ボタンを押してください。",
+      "error",
+      8000
     );
     return;
   }
@@ -4447,27 +4491,66 @@ function performUndo() {
   return true;
 }
 
-function showUndoToast(message) {
-  let t = document.getElementById("undoToast");
-  if (!t) {
-    t = document.createElement("div");
-    t.id = "undoToast";
-    t.style.cssText =
+// Non-blocking toast notification, replacement for blocking alert(). Stacks at
+// the bottom of the screen so during a show the director sees the message
+// without losing focus on whatever button they were about to press.
+//
+//   type: "info" (default) | "success" | "warn" | "error"
+//   duration: ms; "error" defaults to 4500ms, others 2200ms
+//
+// Returns the toast element so callers can dismiss it manually if they need to.
+function showToast(message, type, duration) {
+  const t = type || "info";
+  const ms = duration != null
+    ? duration
+    : (t === "error" ? 4500 : (t === "warn" ? 3200 : 2200));
+  let stack = document.getElementById("toastStack");
+  if (!stack) {
+    stack = document.createElement("div");
+    stack.id = "toastStack";
+    stack.style.cssText =
       "position:fixed;bottom:24px;left:50%;transform:translateX(-50%);" +
-      "background:#262624;color:#ece6d8;padding:10px 18px;border-radius:8px;" +
-      "border:1px solid #46463f;box-shadow:0 8px 24px rgba(0,0,0,.4);" +
-      "font:600 13px/1.4 'Helvetica Neue','Hiragino Sans',sans-serif;" +
-      "z-index:99998;opacity:0;transition:opacity .2s,transform .2s;pointer-events:none";
-    document.body.appendChild(t);
+      "z-index:99998;display:flex;flex-direction:column;gap:8px;align-items:center;" +
+      "pointer-events:none;max-width:90vw";
+    document.body.appendChild(stack);
   }
-  t.textContent = message;
+  const colors = {
+    info:    { bg: "#262624", border: "#46463f", color: "#ece6d8" },
+    success: { bg: "#2f4f3a", border: "#5fa977", color: "#ece6d8" },
+    warn:    { bg: "#3d2f24", border: "#d4a27a", color: "#f7e0c8" },
+    error:   { bg: "#3d2620", border: "#c34a36", color: "#fae0d8" },
+  };
+  const c = colors[t] || colors.info;
+  const el = document.createElement("div");
+  el.style.cssText =
+    "background:" + c.bg + ";color:" + c.color + ";" +
+    "padding:10px 18px;border-radius:8px;" +
+    "border:1px solid " + c.border + ";box-shadow:0 8px 24px rgba(0,0,0,.4);" +
+    "font:600 13px/1.5 'Helvetica Neue','Hiragino Sans',sans-serif;" +
+    "opacity:0;transform:translateY(8px);transition:opacity .2s,transform .2s;" +
+    "pointer-events:auto;cursor:pointer;max-width:480px;text-align:center";
+  el.textContent = message;
+  el.title = "クリックで閉じる";
+  el.addEventListener("click", () => dismiss());
+  stack.appendChild(el);
   requestAnimationFrame(() => {
-    t.style.opacity = "1";
-    t.style.transform = "translateX(-50%) translateY(0)";
+    el.style.opacity = "1";
+    el.style.transform = "translateY(0)";
   });
-  clearTimeout(showUndoToast._t);
-  showUndoToast._t = setTimeout(() => { t.style.opacity = "0"; }, 1800);
+  let dismissed = false;
+  function dismiss() {
+    if (dismissed) return;
+    dismissed = true;
+    el.style.opacity = "0";
+    el.style.transform = "translateY(8px)";
+    setTimeout(() => { el.remove(); }, 250);
+  }
+  setTimeout(dismiss, ms);
+  return el;
 }
+
+// Backward-compat alias — earlier code called this for the undo confirmation.
+function showUndoToast(message) { return showToast(message, "info"); }
 
 // Persistent on-screen banner (top of viewport) for storage problems the user
 // MUST notice — localStorage is the only source of truth, so a silent save
@@ -4715,11 +4798,11 @@ function exportSetlistToFile(sid) {
 
 function importSetlistFromObject(obj) {
   if (!obj || obj.format !== PROMPTER_FILE_FORMAT) {
-    alert("ファイル形式が違います（.prompter ファイルではないようです）。");
+    showToast("ファイル形式が違います（.prompter ファイルではないようです）", "error");
     return false;
   }
   if (!Array.isArray(obj.songs)) {
-    alert("セットリストデータが壊れているようです。");
+    showToast("セットリストデータが壊れているようです", "error");
     return false;
   }
   // Build a fresh setlist from the imported data, with a new id so it
@@ -4748,7 +4831,7 @@ function importSetlistFromObject(obj) {
     updatedAt: Date.now(),
   };
   if (!sl.songs.length) {
-    alert("インポートできる曲がありませんでした。");
+    showToast("インポートできる曲がありませんでした", "warn");
     return false;
   }
   if (!sl.songs.some(s => s.id === sl.currentSongId)) sl.currentSongId = sl.songs[0].id;
@@ -4769,10 +4852,10 @@ function importSetlistFromFile(file) {
         // Don't auto-open — let the director see the new card on the picker.
       }
     } catch (e) {
-      alert("ファイルを読み込めませんでした: " + (e.message || e));
+      showToast("ファイルを読み込めませんでした: " + (e.message || e), "error");
     }
   };
-  reader.onerror = () => alert("ファイル読み込みエラー");
+  reader.onerror = () => showToast("ファイル読み込みエラー", "error");
   reader.readAsText(file);
 }
 
@@ -4952,7 +5035,7 @@ function duplicateSetlist(sid) {
 
 function deleteSetlist(sid) {
   if (setlistsData.setlists.length <= 1) {
-    alert("最後のセットリストは削除できません。");
+    showToast("最後のセットリストは削除できません", "warn");
     return;
   }
   const sl = setlistsData.setlists.find(s => s.id === sid);
@@ -6108,7 +6191,7 @@ document.getElementById("oeResetPage").addEventListener("click", () => {
   if (oe.songId == null || oe.pageIdx == null) return;
   const song = state.songs.find(s => s.id === oe.songId);
   if (!song || !song.pageOverrides || song.pageOverrides[oe.pageIdx] == null) {
-    alert("このページに右ペイン側の編集はありません。");
+    showToast("このページに右ペイン側の編集はありません", "info");
     return;
   }
   if (!confirm("このページの右ペイン編集を破棄して、左テキスト入力の内容に戻しますか？")) return;
