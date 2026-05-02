@@ -4245,6 +4245,8 @@ function openExternalPrompter() {
     externalWin.document.open();
     externalWin.document.write(html);
     externalWin.document.close();
+    // The window is alive — clear any leftover ⚠ from a previous block.
+    unmarkExternalBtnBlocked();
     return;
   }
   externalWin = window.open("", "prompter-external",
@@ -4500,7 +4502,13 @@ function setSaveIndicator(state, label) {
 
 function saveSetlistsDebounced() {
   clearTimeout(saveSetlistsDebounced._t);
-  setSaveIndicator("saving", "保存中…");
+  // Only flip to "saving…" if we're not already in an error state — once
+  // we've shown an error the user is told to act, and a successful save
+  // will explicitly clear the error path inside saveSetlistsNow().
+  const indicator = document.getElementById("saveIndicator");
+  if (!indicator || !indicator.classList.contains("error")) {
+    setSaveIndicator("saving", "保存中…");
+  }
   saveSetlistsDebounced._t = setTimeout(() => saveSetlistsNow(), 400);
 }
 
@@ -4571,13 +4579,16 @@ function applySetlistToState(sl) {
   state.songs = JSON.parse(JSON.stringify(sl.songs || []));
   state.currentSongId = sl.currentSongId || (state.songs[0]?.id ?? null);
   state.currentPageIdx = 0;
-  // Sync nextSongId counter based on existing numeric suffixes like "song-N"
+  // Sync nextSongId counter based on existing numeric suffixes like "song-N".
+  // For legacy / imported data with non-numeric IDs the loop won't bump
+  // maxSid, so fall back to the array length to avoid colliding with any
+  // existing id that happens to share the next "song-N" slot.
   let maxSid = 0;
   state.songs.forEach(s => {
     const m = String(s.id || "").match(/(\d+)$/);
     if (m) maxSid = Math.max(maxSid, parseInt(m[1], 10));
   });
-  nextSongId = maxSid + 1;
+  nextSongId = Math.max(maxSid, state.songs.length) + 1;
   // Update header display
   document.getElementById("currentSetlistName").textContent = state.concertTitle || "(無題)";
 }
@@ -4911,7 +4922,11 @@ function renameSetlist(sid) {
   if (!sl) return;
   const newName = prompt("セットリスト名", sl.name || "");
   if (newName == null) return;
-  sl.name = newName.trim() || "(無題)";
+  const trimmed = newName.trim() || "(無題)";
+  if (trimmed === sl.name) return; // no-op, don't pollute the undo stack
+  // Snapshot before the rename so Cmd+Shift+Z can restore the old name
+  pushUndoSnapshot(`「${sl.name || "(無題)"}」を改名`);
+  sl.name = trimmed;
   if (sid === setlistsData.currentSetlistId) {
     state.concertTitle = sl.name;
     document.getElementById("currentSetlistName").textContent = sl.name;
@@ -4923,6 +4938,8 @@ function renameSetlist(sid) {
 function duplicateSetlist(sid) {
   const sl = setlistsData.setlists.find(s => s.id === sid);
   if (!sl) return;
+  // Snapshot so the duplicated setlist can be undone in one go
+  pushUndoSnapshot(`「${sl.name || "(無題)"}」を複製`);
   const copy = JSON.parse(JSON.stringify(sl));
   copy.id = genSetlistId();
   copy.name = (sl.name || "セットリスト") + " のコピー";
@@ -6211,10 +6228,16 @@ if ("serviceWorker" in navigator) {
 // Cmd+Z is intentionally NOT used because the lyrics textarea has its own
 // native undo for per-character editing; we'd otherwise hijack it.
 document.addEventListener("keydown", (e) => {
-  // Don't fire while a modal-ish input is up
+  // Don't fire while the overlay editor is open — its own keyboard layer
+  // owns Delete/Esc/etc. and we'd step on it.
   if (document.getElementById("overlayEditor")?.classList.contains("open")) return;
   const isUndoCombo = (e.key === "Z" || e.key === "z") && e.shiftKey && (e.metaKey || e.ctrlKey);
   if (!isUndoCombo) return;
+  // Don't hijack Cmd+Shift+Z when focus is in a text input — that combo is
+  // the OS-level "redo" for native edit fields and the user expects it to
+  // restore characters they just undid with Cmd+Z.
+  const a = document.activeElement;
+  if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable)) return;
   if (UNDO_STACK.length === 0) return;
   e.preventDefault();
   performUndo();
